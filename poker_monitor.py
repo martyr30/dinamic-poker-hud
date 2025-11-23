@@ -187,16 +187,16 @@ def process_file_full_load(file_path: str, filter_segment: Optional[str] = None,
         table_segment = get_table_name_segment(min_bet, seat_count)
         date_segment = datetime.date(year=first_hh.year, month=first_hh.month, day=first_hh.day)
 
-        print(f"   [LOAD] Анализ {filename} -> Сегмент: {table_segment}")
+        # print(f"   [LOAD] Анализ {filename} -> Сегмент: {table_segment}")
 
         if filter_segment and filter_segment != table_segment:
-            print(f"   [LOAD] Пропуск {filename} -> Сегмент: {table_segment}")
+            # print(f"   [LOAD] Пропуск {filename} -> Сегмент: {table_segment}")
             return
 
         if filter_date:
             filter_dt = datetime.datetime.strptime(filter_date, "%Y-%m-%d").date()
             if date_segment < filter_dt:
-                print(f"   [LOAD] Пропуск {date_segment} -> Ранее: {filter_dt}")
+                # print(f"   [LOAD] Пропуск {date_segment} -> Ранее: {filter_dt}")
                 return
 
         # Обработка и запись в БД
@@ -204,7 +204,7 @@ def process_file_full_load(file_path: str, filter_segment: Optional[str] = None,
             stats_to_commit = analyze_hand_for_stats(hh)
             update_stats_in_db(stats_to_commit, table_segment)
             player_stats_to_commit = analyze_player_stats(hh, MY_PLAYER_NAME)
-            print(player_stats_to_commit)
+            # print(player_stats_to_commit)
             update_hand_stats_in_db(player_stats_to_commit)
         # Устанавливаем размер, чтобы монитор не читал его заново
         FILE_SIZES[file_path] = os.path.getsize(file_path)

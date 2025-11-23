@@ -69,6 +69,8 @@ def setup_database_table(table_segment: str):
                 is_pfr BOOLEAN NOT NULL,                -- PFR (да/нет)
                 is_vpip BOOLEAN NOT NULL,               -- VPIP (да/нет)
                 first_action TEXT,                      -- Первое агрессивное действие (рейз, колл, фолд)
+                first_raiser_position TEXT,
+                is_steal_attempt BOOLEAN NOT NULL,
                 time_logged DATETIME DEFAULT CURRENT_TIMESTAMP,
 
                 PRIMARY KEY (hand_id, player_name)
@@ -242,7 +244,8 @@ def analyze_hand_for_stats(hand_history: HandHistory):
             'rfi_succ_co': data['rfi_succ_co'],
             'rfi_succ_bu': data['rfi_succ_bu']
         }
-
+    # print("ALL players stats:")
+    # print(final_stats)
     return final_stats
 
 # --- 2.2 ФУНКЦИЯ АНАЛИЗА РАЗДАЧИ ИГРОКА ---
@@ -253,10 +256,12 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
     analyze_player_code = ""
     # Инициализация всех игроков
     for i, player_name in enumerate(all_players):
+        player_code = f'p{i + 1}'
+        player_position = determine_position( i+1, len(all_players) )
+        player_map[player_code] = [player_name, player_position]
+        # print(player_map[player_code])
         if player_name == analyze_player_name:
             analyze_player_code = f'p{i + 1}'
-            player_position = determine_position( i+1, len(all_players) )
-            player_map[analyze_player_code] = [player_name, player_position]
             stats_update[player_name] = {
                 'hand_id': hand_history.hand,
                 'table_part_name': hand_history.table,
@@ -267,19 +272,23 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
                 'is_pfr': 0,
                 'is_vpip': 0,
                 'first_action': "uncalled",
+                'first_raiser_position': "",
+                'is_steal_attempt': 0,
+                # 'actions': [],
                 'time_logged': datetime.date(year=hand_history.year, month=hand_history.month, day=hand_history.day)
             }
 
-    print("Старт анализа руки")
-    print(hand_history.actions)
+    # print("Старт анализа руки")
+    # print(stats_update)
+    # print(hand_history.actions)
     # --- Отслеживание префлоп-действий ---
-    state = '0rfi' # 0rfi, 0bet, 2bet, 3bet
+    state = '0rfi' # 0rfi, 0limp, 1bet, 3bet, 4bet
     first_action = True
 
     # 1. Первый проход: Основные действия и определение 3-бетов
     for action_str in hand_history.actions:
         parts = action_str.split()
-        print(parts)
+        # print(parts[3])
 
         if parts[1] in ('db', 'sm'): # Конец префлопа
             break
@@ -299,8 +308,15 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
                 stats_update[analyze_player_name]['is_rfi'] = 1
 
             if action_type_code != 'f':
-                if state == '0rfi':
-                    state = '0bet'
+                if action_type_code == 'cbr':
+                    if state == '0rfi':
+                        state = '1bet'
+                        stats_update[analyze_player_name]['first_raiser_position'] = player_map.get(player_code)[1]
+                        if player_map.get(player_code)[1] in ('co', 'bu', 'sb'):
+                            stats_update[analyze_player_name]['is_steal_attempt'] = 1
+                else:
+                    state = '0limp'
+
 
             # --- VPIP/PFR (Ваша логика) ---
             if player_code == analyze_player_code:
@@ -310,6 +326,7 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
                 # rbr (Raise) - это PFR
                 if action_type_code in ('cbr'):
                     stats_update[analyze_player_name]['is_pfr'] = 1
+
 
     # 2. Финальная агрегация (для очистки булевых значений)
     final_stats = {}
@@ -325,9 +342,13 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
             'is_pfr': data['is_pfr'],
             'is_vpip': data['is_vpip'],
             'first_action': data['first_action'],
+            'first_raiser_position': data['first_raiser_position'],
+            'is_steal_attempt': data['is_steal_attempt'],
             'time_logged': data['time_logged']
         }
-    print(final_stats)
+    # print('Final Stats:')
+    # print(stats_update)
+    # print(final_stats)
     return final_stats
 
 
@@ -436,6 +457,7 @@ def update_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]], table_segment
 def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
     """Сохраняет данные об одной сыгранной раздаче в лог."""
     try:
+        print(stats_to_commit)
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
 
@@ -449,16 +471,20 @@ def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
             is_pfr = data.get('is_pfr', 0)
             is_vpip = data.get('is_vpip', 0)
             first_action = data.get('first_action', "")
+            first_raiser_position = data.get('first_raiser_position', "")
+            is_steal_attempt = data.get('is_steal_attempt', "")
             time_logged = data.get('time_logged', "1990-01-01")
 
             conn.execute("""
                 INSERT OR REPLACE INTO my_hand_log (
                     hand_id, table_part_name, player_name, position, cards,
-                    is_rfi, is_pfr, is_vpip, first_action
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    is_rfi, is_pfr, is_vpip, first_action, first_raiser_position,
+                    is_steal_attempt
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 hand_id, table_part_name, player_name, position, cards,
-                is_rfi, is_pfr, is_vpip, first_action
+                is_rfi, is_pfr, is_vpip, first_action, first_raiser_position,
+                is_steal_attempt
             ))
         conn.commit()
     except Exception as e:
