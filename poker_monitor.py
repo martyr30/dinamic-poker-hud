@@ -6,6 +6,7 @@ import datetime
 from typing import Optional, Dict, List
 from PySide6.QtCore import QThread, Signal, QObject
 from pokerkit import HandHistory
+from my_pokerkit_parser import CustomHandHistory
 from poker_globals import FILE_SIZES, MY_PLAYER_NAME, ACTION_POSITIONS, StatUpdateData, get_table_name_segment
 from poker_stats_db import (
     analyze_hand_for_stats,
@@ -96,8 +97,10 @@ def process_file_update(file_path: str, filter_segment: Optional[str] = None, fi
             FILE_SIZES[file_path] = current_size
             return None
 
-        hhs_iterator = HandHistory.from_pokerstars(new_content, error_status=True)
+        hhs_iterator = CustomHandHistory.from_pokerstars(new_content, error_status=True)
         hhs_list = list(hhs_iterator)
+
+        print(f"--- [MONITOR DEBUG] Найдено {len(hhs_list)} новых раздач в файле {os.path.basename(file_path)}.")
 
         if not hhs_list:
             FILE_SIZES[file_path] = current_size
@@ -127,6 +130,7 @@ def process_file_update(file_path: str, filter_segment: Optional[str] = None, fi
 
         # 2. Обработка и запись в БД
         for i, hh in enumerate(hhs_list): # Используем enumerate для отслеживания последней раздачи
+            print(f"--- [MONITOR DEBUG] Обработка раздачи #{i+1}/{len(hhs_list)}: ID {hh.hand}")
             stats_to_commit = analyze_hand_for_stats(hh)
             update_stats_in_db(stats_to_commit, table_segment)
             player_stats_to_commit = analyze_player_stats(hh, MY_PLAYER_NAME)
@@ -174,7 +178,7 @@ def process_file_full_load(file_path: str, filter_segment: Optional[str] = None,
         if not full_content.strip():
             return
 
-        hhs_iterator = HandHistory.from_pokerstars(full_content, error_status=True)
+        hhs_iterator = CustomHandHistory.from_pokerstars(full_content, error_status=True)
         hhs_list = list(hhs_iterator)
 
         if not hhs_list:

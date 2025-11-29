@@ -4,6 +4,7 @@ import sqlite3
 import decimal
 import datetime
 from typing import Dict, Any, List, Optional
+from decimal import Decimal
 from pokerkit import HandHistory
 # Добавляем импорт для генерации имени таблицы
 from poker_globals import DB_NAME, ACTION_POSITIONS, ALL_STATS_FIELDS, get_table_name_segment
@@ -71,6 +72,7 @@ def setup_database_table(table_segment: str):
                 first_action TEXT,                      -- Первое агрессивное действие (рейз, колл, фолд)
                 first_raiser_position TEXT,
                 is_steal_attempt BOOLEAN NOT NULL,
+                net_profit DECIMAL(10,2),
                 time_logged DATETIME DEFAULT CURRENT_TIMESTAMP,
 
                 PRIMARY KEY (hand_id, player_name)
@@ -254,6 +256,20 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
     player_map = {}
     all_players = [p for p in hand_history.players]
     analyze_player_code = ""
+    player_bet = Decimal('0.00')
+    player_win = Decimal('0.00')
+    print("---Start---")
+    print(hand_history.hand)
+    print(hand_history.blinds_or_straddles)
+
+    # --- ОТЛАДОЧНЫЙ ВЫВОД ---
+    # Проверяем длину всех ключевых списков. Они должны быть одинаковыми.
+    print(f"--- [DEBUG] Длина списка игроков: {len(hand_history.players)}")
+    print(f"--- [DEBUG] Длина списка блайндов: {len(hand_history.blinds_or_straddles)}")
+    print(f"--- [DEBUG] Список выигрышей: {hand_history.winnings}")
+    # -------------------------
+
+    print(hand_history.winnings)
     # Инициализация всех игроков
     for i, player_name in enumerate(all_players):
         player_code = f'p{i + 1}'
@@ -275,8 +291,29 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
                 'first_raiser_position': "",
                 'is_steal_attempt': 0,
                 # 'actions': [],
+                'net_profit': 0.00,
                 'time_logged': datetime.date(year=hand_history.year, month=hand_history.month, day=hand_history.day)
             }
+            
+            # --- ОТЛАДОЧНЫЙ БЛОК ДЛЯ ПОИСКА ОШИБКИ ---
+            try:
+                # ВАЖНО: Проверяем, что список блайндов существует, прежде чем обращаться к нему
+                if hand_history.blinds_or_straddles and hand_history.blinds_or_straddles[i] != 0:
+                    player_bet = hand_history.blinds_or_straddles[i]
+                # Аналогичная проверка для выигрышей
+                if hand_history.winnings and hand_history.winnings[i] != 0:
+                    player_win = hand_history.winnings[i]
+            except IndexError:
+                print("\n--- [ОШИБКА DEBUG] Пойман IndexError! ---")
+                print(f"ID раздачи: {hand_history.hand}")
+                print(f"Индекс игрока (i): {i}")
+                print(f"Имя игрока: {player_name}")
+                print(f"Всего игроков в hh: {len(all_players)}")
+                print(f"Длина списка блайндов: {len(hand_history.blinds_or_straddles) if hand_history.blinds_or_straddles else 'None'}")
+                print(f"Длина списка выигрышей: {len(hand_history.winnings) if hand_history.winnings else 'None'}")
+                print("--- КОНЕЦ ОТЛАДКИ ---\n")
+                # Перевызываем ошибку, чтобы увидеть полный traceback
+                raise
 
     # print("Старт анализа руки")
     # print(stats_update)
@@ -285,7 +322,7 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
     state = '0rfi' # 0rfi, 0limp, 1bet, 3bet, 4bet
     first_action = True
 
-    # 1. Первый проход: Основные действия и определение 3-бетов
+    # 1.1 Префлоп: Основные действия и определение 3-бетов
     for action_str in hand_history.actions:
         parts = action_str.split()
         # print(parts[3])
@@ -327,7 +364,18 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
                 if action_type_code in ('cbr'):
                     stats_update[analyze_player_name]['is_pfr'] = 1
 
-
+    # 1.2 Подсчет инвестиций и выигрыша
+    for action_str in hand_history.actions:
+        parts = action_str.split()
+        if action_str.startswith('p'):
+            player_code = parts[0]
+            action_type_code = parts[1]
+            # ВАЖНО: Проверяем, что parts[2] существует (для 'cbr' и 'cc' с суммой)
+            if player_code == analyze_player_code and action_type_code in ('cc', 'cbr') and len(parts) > 2:
+                player_bet += Decimal(parts[2])
+    stats_update[analyze_player_name]['net_profit'] = player_win - player_bet
+    print(player_bet)
+    print(player_win)
     # 2. Финальная агрегация (для очистки булевых значений)
     final_stats = {}
     for name, data in stats_update.items():
@@ -344,6 +392,7 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
             'first_action': data['first_action'],
             'first_raiser_position': data['first_raiser_position'],
             'is_steal_attempt': data['is_steal_attempt'],
+            'net_profit': data['net_profit'],
             'time_logged': data['time_logged']
         }
     # print('Final Stats:')
@@ -473,18 +522,19 @@ def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
             first_action = data.get('first_action', "")
             first_raiser_position = data.get('first_raiser_position', "")
             is_steal_attempt = data.get('is_steal_attempt', "")
+            net_profit = float(data.get('net_profit', 0.00))
             time_logged = data.get('time_logged', "1990-01-01")
 
             conn.execute("""
                 INSERT OR REPLACE INTO my_hand_log (
                     hand_id, table_part_name, player_name, position, cards,
                     is_rfi, is_pfr, is_vpip, first_action, first_raiser_position,
-                    is_steal_attempt
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    is_steal_attempt, net_profit
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 hand_id, table_part_name, player_name, position, cards,
                 is_rfi, is_pfr, is_vpip, first_action, first_raiser_position,
-                is_steal_attempt
+                is_steal_attempt, net_profit
             ))
         conn.commit()
     except Exception as e:
