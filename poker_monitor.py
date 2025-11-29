@@ -100,8 +100,6 @@ def process_file_update(file_path: str, filter_segment: Optional[str] = None, fi
         hhs_iterator = CustomHandHistory.from_pokerstars(new_content, error_status=True)
         hhs_list = list(hhs_iterator)
 
-        print(f"--- [MONITOR DEBUG] Найдено {len(hhs_list)} новых раздач в файле {os.path.basename(file_path)}.")
-
         if not hhs_list:
             FILE_SIZES[file_path] = current_size
             return None
@@ -113,8 +111,6 @@ def process_file_update(file_path: str, filter_segment: Optional[str] = None, fi
         seat_count = first_hh.seat_count
         table_segment = get_table_name_segment(min_bet, seat_count)
         date_segment = datetime.date(year=first_hh.year, month=first_hh.month, day=first_hh.day)
-
-        print(f"📊 Сегмент стола: {table_segment}")
 
         if filter_segment and filter_segment != table_segment:
             print(f"   [LOAD] Пропуск {filename} -> Сегмент: {table_segment}")
@@ -130,7 +126,6 @@ def process_file_update(file_path: str, filter_segment: Optional[str] = None, fi
 
         # 2. Обработка и запись в БД
         for i, hh in enumerate(hhs_list): # Используем enumerate для отслеживания последней раздачи
-            print(f"--- [MONITOR DEBUG] Обработка раздачи #{i+1}/{len(hhs_list)}: ID {hh.hand}")
             stats_to_commit = analyze_hand_for_stats(hh)
             update_stats_in_db(stats_to_commit, table_segment)
             player_stats_to_commit = analyze_player_stats(hh, MY_PLAYER_NAME)
@@ -146,16 +141,11 @@ def process_file_update(file_path: str, filter_segment: Optional[str] = None, fi
 
         FILE_SIZES[file_path] = current_size
 
-        print(f"✅ Успешно обработана раздача. Обновление HUD для: {os.path.basename(file_path)}")
-
         # 3. ВОЗВРАЩАЕМ 4 ЗНАЧЕНИЯ (игроки только из последней раздачи)
         return (file_path, list(last_players_committed), table_title_part, table_segment)
 
     except Exception as e:
         print(f"❌ Критическая ошибка парсинга в {os.path.basename(file_path)}: {e}")
-        # Печатаем сегмент стола, даже если произошла ошибка
-        if 'table_segment' in locals():
-            print(f"📊 Сегмент стола: {table_segment}")
         return None
 
 def process_file_full_load(file_path: str, filter_segment: Optional[str] = None, filter_date: Optional[str] = None):
@@ -191,8 +181,6 @@ def process_file_full_load(file_path: str, filter_segment: Optional[str] = None,
         table_segment = get_table_name_segment(min_bet, seat_count)
         date_segment = datetime.date(year=first_hh.year, month=first_hh.month, day=first_hh.day)
 
-        # print(f"   [LOAD] Анализ {filename} -> Сегмент: {table_segment}")
-
         if filter_segment and filter_segment != table_segment:
             # print(f"   [LOAD] Пропуск {filename} -> Сегмент: {table_segment}")
             return
@@ -208,7 +196,6 @@ def process_file_full_load(file_path: str, filter_segment: Optional[str] = None,
             stats_to_commit = analyze_hand_for_stats(hh)
             update_stats_in_db(stats_to_commit, table_segment)
             player_stats_to_commit = analyze_player_stats(hh, MY_PLAYER_NAME)
-            # print(player_stats_to_commit)
             update_hand_stats_in_db(player_stats_to_commit)
         # Устанавливаем размер, чтобы монитор не читал его заново
         FILE_SIZES[file_path] = os.path.getsize(file_path)

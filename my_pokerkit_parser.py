@@ -78,7 +78,6 @@ class CustomPokerStarsParser(PokerStarsParser):
         Переопределенный метод для сбора имен игроков.
         Умеет работать с кортежем регулярных выражений для ставок/рейзов.
         """
-        print("\n--- [DEBUG] Запуск _parse_players для определения активных игроков ---")
         all_players_at_table = set()
         sitting_out_players = set()
 
@@ -88,7 +87,6 @@ class CustomPokerStarsParser(PokerStarsParser):
             if m := search(self.STARTING_STACKS, line):
                 player_name = m.group('player')
                 all_players_at_table.add(player_name)
-                print(line)
                 # Проверяем, не находится ли этот игрок в ситауте
                 if 'is sitting out' in line:
                     sitting_out_players.add(player_name)
@@ -100,7 +98,6 @@ class CustomPokerStarsParser(PokerStarsParser):
 
         # Возвращаем только активных игроков
         active_players = all_players_at_table - sitting_out_players
-        print(f"--- [DEBUG] _parse_players завершен. Всего за столом: {len(all_players_at_table)}. В ситауте: {len(sitting_out_players)}. Активных: {len(active_players)} ---")
         return active_players
 
     # Переопределяем метод парсинга действий
@@ -114,7 +111,6 @@ class CustomPokerStarsParser(PokerStarsParser):
         Переопределенный метод для парсинга действий, который умеет
         работать с кортежем регулярных выражений для ставок и рейзов.
         """
-        print("\n--- [DEBUG] Запуск _parse_actions ---")
         def format_player(m: Match[str]) -> str:
             player_index = players.index(m['player'])
             return f'p{player_index + 1}'
@@ -125,11 +121,8 @@ class CustomPokerStarsParser(PokerStarsParser):
             line for line in s.splitlines()
             if not any(pattern.match(line) for pattern in self.IGNORED_ACTION_PATTERNS)
         ]
-        print(f"--- [DEBUG] Отфильтровано {len(s.splitlines()) - len(filtered_lines)} строк. Обрабатывается {len(filtered_lines)} строк. ---")
 
         for i, line in enumerate(filtered_lines):
-            print(f"--- [DEBUG] Строка {i+1}/{len(filtered_lines)}: '{line}'")
-
             action = None
 
             if m := search(self.BLIND_OR_STRADDLE_POSTING, line):
@@ -156,7 +149,6 @@ class CustomPokerStarsParser(PokerStarsParser):
             if action is not None:
                 actions.append(action)
 
-        print(f"--- [DEBUG] Завершение _parse_actions. Найдено действий: {len(actions)} ---")
         return actions
 
     # Этот метод нужен, чтобы PLAYER_VARIABLES мог обрабатывать кортеж из выражений
@@ -169,8 +161,6 @@ class CustomPokerStarsParser(PokerStarsParser):
         Переопределенный метод для обработки выигрышей, который игнорирует
         игроков в ситауте.
         """
-        print("\n--- [DEBUG] Запуск _parse_player_variables ---")
-
         # ВАЖНО: Сначала получаем список активных игроков, как это делает pokerkit
         # Мы вызываем оригинальный метод _parse_players из родительского класса.
         # Это гарантирует, что мы будем работать с тем же списком, что и остальная часть библиотеки.
@@ -187,8 +177,6 @@ class CustomPokerStarsParser(PokerStarsParser):
             elif ': sits out' in line: # Формат: PlayerName: sits out
                 player_name = line.split(':')[0].strip()
                 sitting_out_players.add(player_name)
-        print(f"--- [DEBUG] Игроки: {active_players}")
-        print(f"--- [DEBUG] Игроки в ситауте: {sitting_out_players}")
 
         player_variables = {}
 
@@ -233,8 +221,6 @@ class CustomPokerStarsParser(PokerStarsParser):
 
             if sub_player_variables:
                 player_variables[key] = sub_player_variables
-
-        print(f"--- [DEBUG] _parse_player_variables завершен. Найдены переменные: {list(player_variables.keys())} ---")
 
         return player_variables
 
