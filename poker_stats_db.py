@@ -4,6 +4,7 @@ import sqlite3
 import decimal
 import datetime
 from typing import Dict, Any, List, Optional
+from decimal import Decimal
 from pokerkit import HandHistory
 # Добавляем импорт для генерации имени таблицы
 from poker_globals import DB_NAME, ACTION_POSITIONS, ALL_STATS_FIELDS, get_table_name_segment
@@ -71,6 +72,7 @@ def setup_database_table(table_segment: str):
                 first_action TEXT,                      -- Первое агрессивное действие (рейз, колл, фолд)
                 first_raiser_position TEXT,
                 is_steal_attempt BOOLEAN NOT NULL,
+                net_profit DECIMAL(10,2),
                 time_logged DATETIME DEFAULT CURRENT_TIMESTAMP,
 
                 PRIMARY KEY (hand_id, player_name)
@@ -254,6 +256,8 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
     player_map = {}
     all_players = [p for p in hand_history.players]
     analyze_player_code = ""
+    player_bet = Decimal('0.00')
+    player_win = Decimal('0.00')
     # Инициализация всех игроков
     for i, player_name in enumerate(all_players):
         player_code = f'p{i + 1}'
@@ -275,17 +279,26 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
                 'first_raiser_position': "",
                 'is_steal_attempt': 0,
                 # 'actions': [],
+                'net_profit': 0.00,
                 'time_logged': datetime.date(year=hand_history.year, month=hand_history.month, day=hand_history.day)
             }
-
-    # print("Старт анализа руки")
-    # print(stats_update)
-    # print(hand_history.actions)
+            
+            # --- ОТЛАДОЧНЫЙ БЛОК ДЛЯ ПОИСКА ОШИБКИ ---
+            try:
+                # ВАЖНО: Проверяем, что список блайндов существует, прежде чем обращаться к нему
+                # if hand_history.blinds_or_straddles and hand_history.blinds_or_straddles[i] != 0:
+                #     player_bet = hand_history.blinds_or_straddles[i]
+                # Аналогичная проверка для выигрышей
+                if hand_history.winnings and i < len(hand_history.winnings) and hand_history.winnings[i] != 0:
+                    player_win = hand_history.winnings[i]
+            except IndexError:
+                # Перевызываем ошибку, чтобы увидеть полный traceback
+                raise
     # --- Отслеживание префлоп-действий ---
     state = '0rfi' # 0rfi, 0limp, 1bet, 3bet, 4bet
     first_action = True
 
-    # 1. Первый проход: Основные действия и определение 3-бетов
+    # 1.1 Префлоп: Основные действия и определение 3-бетов
     for action_str in hand_history.actions:
         parts = action_str.split()
         # print(parts[3])
@@ -327,7 +340,93 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
                 if action_type_code in ('cbr'):
                     stats_update[analyze_player_name]['is_pfr'] = 1
 
+    # 1.2 Подсчет инвестиций и выигрыша.
+    # Мы должны отслеживать ставки на каждой улице (префлоп, флоп, терн, ривер),
+    # чтобы правильно вычислять размеры коллов и общие инвестиции.
+    total_investment = {p_code: Decimal('0.00') for p_code in player_map.keys()}
+    bets_this_street = {p_code: Decimal('0.00') for p_code in player_map.keys()}
+    remaining_stacks = {f'p{i+1}': stack for i, stack in enumerate(hand_history.starting_stacks)}
+    current_street_bet = Decimal('0.00')
+    last_bet_by_player = {'player': None, 'amount': Decimal('0.00')}
+    last_action_was_fold = False
+    
+    decimal.getcontext().prec = 10 # Увеличиваем точность для Decimal
 
+    # Инициализируем ставки блайндами
+    for i, p_name in enumerate(all_players):
+        p_code = f'p{i+1}'
+        if hand_history.blinds_or_straddles and i < len(hand_history.blinds_or_straddles):
+            blind_amount = hand_history.blinds_or_straddles[i]
+            if blind_amount > 0:
+                investment = min(blind_amount, remaining_stacks.get(p_code, Decimal('0.00')))
+                total_investment[p_code] += investment
+                remaining_stacks[p_code] -= investment # ❗️ Уменьшаем остаток стека
+                bets_this_street[p_code] = blind_amount
+                # На префлопе самая большая ставка - это BB
+                if blind_amount > current_street_bet:
+                    current_street_bet = blind_amount
+
+    for action_str in hand_history.actions:
+        parts = action_str.split()
+
+        # Сброс ставок при переходе на новую улицу (флоп, терн, ривер)
+        if parts[0] == 'd' and parts[1] == 'db':
+            bets_this_street = {p_code: Decimal('0.00') for p_code in player_map.keys()}
+            current_street_bet = Decimal('0.00')
+            last_bet_by_player = {'player': None, 'amount': Decimal('0.00')}
+            continue
+
+        if action_str.startswith('p'):
+            player_code = parts[0]
+            action_type_code = parts[1]
+            last_action_was_fold = False
+
+            if action_type_code == 'cbr': # Bet/Raise
+                raise_to_amount = Decimal(parts[2])
+                already_invested_this_street = bets_this_street.get(player_code, Decimal('0.00'))
+                additional_investment = raise_to_amount - already_invested_this_street
+
+                # Убираем дублирование, оставляем одну строку
+                total_investment[player_code] = total_investment.get(player_code, Decimal('0.00')) + additional_investment
+                remaining_stacks[player_code] -= additional_investment # ❗️ Уменьшаем остаток стека
+                bets_this_street[player_code] = raise_to_amount
+                current_street_bet = raise_to_amount
+                last_bet_by_player = {'player': player_code, 'amount': additional_investment}
+
+            elif action_type_code == 'cc': # Call
+                last_bet_by_player = {'player': None, 'amount': Decimal('0.00')}
+                already_invested_this_street = bets_this_street.get(player_code, Decimal('0.00'))
+                
+                required_call = current_street_bet - already_invested_this_street
+                
+                # ❗️ Новая логика с учетом стека: Игрок не может поставить больше, чем у него есть
+                player_stack = total_investment.get(player_code, Decimal('0.00'))
+                # Вычисляем реальный остаток стека
+                real_remaining_stack = remaining_stacks.get(player_code, Decimal('0.00'))
+                
+                call_amount = min(required_call, real_remaining_stack)
+
+                if call_amount > 0:
+                    # Убираем дублирование
+                    total_investment[player_code] = total_investment.get(player_code, Decimal('0.00')) + call_amount
+                    remaining_stacks[player_code] -= call_amount # ❗️ Уменьшаем остаток стека
+                    bets_this_street[player_code] = bets_this_street.get(player_code, Decimal('0.00')) + call_amount
+
+                total_invested_by_caller = bets_this_street.get(player_code, Decimal('0.00'))
+                if total_invested_by_caller < current_street_bet:
+                    current_street_bet = total_invested_by_caller
+
+            elif action_type_code == 'f': # Fold
+                last_action_was_fold = True
+
+    player_bet = total_investment.get(analyze_player_code, Decimal('0.00'))
+
+    # Если последнее действие в истории было фолдом, значит, предыдущая ставка не была принята.
+    if last_action_was_fold and last_bet_by_player['player'] == analyze_player_code:
+        uncalled_bet = last_bet_by_player['amount']
+        player_bet -= uncalled_bet
+
+    stats_update[analyze_player_name]['net_profit'] = player_win - player_bet
     # 2. Финальная агрегация (для очистки булевых значений)
     final_stats = {}
     for name, data in stats_update.items():
@@ -344,11 +443,9 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
             'first_action': data['first_action'],
             'first_raiser_position': data['first_raiser_position'],
             'is_steal_attempt': data['is_steal_attempt'],
+            'net_profit': data['net_profit'],
             'time_logged': data['time_logged']
         }
-    # print('Final Stats:')
-    # print(stats_update)
-    # print(final_stats)
     return final_stats
 
 
@@ -457,7 +554,6 @@ def update_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]], table_segment
 def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
     """Сохраняет данные об одной сыгранной раздаче в лог."""
     try:
-        print(stats_to_commit)
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
 
@@ -473,18 +569,19 @@ def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
             first_action = data.get('first_action', "")
             first_raiser_position = data.get('first_raiser_position', "")
             is_steal_attempt = data.get('is_steal_attempt', "")
+            net_profit = float(data.get('net_profit', 0.00))
             time_logged = data.get('time_logged', "1990-01-01")
 
             conn.execute("""
                 INSERT OR REPLACE INTO my_hand_log (
                     hand_id, table_part_name, player_name, position, cards,
                     is_rfi, is_pfr, is_vpip, first_action, first_raiser_position,
-                    is_steal_attempt
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    is_steal_attempt, net_profit
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 hand_id, table_part_name, player_name, position, cards,
                 is_rfi, is_pfr, is_vpip, first_action, first_raiser_position,
-                is_steal_attempt
+                is_steal_attempt, net_profit
             ))
         conn.commit()
     except Exception as e:
