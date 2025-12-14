@@ -34,7 +34,7 @@ class CustomPokerStarsParser(PokerStarsParser):
                 compile(r'Seat \d+: '
                         r'(?P<player>.+?)'  # Нежадно захватываем имя игрока до...
                         # Пропускаем любой текст до нужной нам конструкции
-                        r' (?:showed|won|\(small blind\)|\(big blind\)|mucked).* won \(\D?(?P<winnings>[0-9.,]+)\)'),
+                        r' (?:showed|won|\(small blind\)|\(big blind\)|\(button\)|mucked).* won \(\D?(?P<winnings>[0-9.,]+)\)'),
             ),
             None,  # parse_pattern (используется parse_value по умолчанию)
             int,   # default_value_factory
