@@ -89,7 +89,7 @@ def process_file_update(file_path: str, filter_segment: Optional[str] = None, fi
         return None
 
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, 'r', encoding='utf-8-sig') as f:
             f.seek(previous_size)
             new_content = f.read()
 
@@ -162,7 +162,7 @@ def process_file_full_load(file_path: str, filter_segment: Optional[str] = None,
         return
 
     try:
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, 'r', encoding='utf-8-sig') as f:
             full_content = f.read()
 
         if not full_content.strip():
