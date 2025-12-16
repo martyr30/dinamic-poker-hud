@@ -3,6 +3,7 @@
 import os
 import time
 import datetime
+import re
 from typing import Optional, Dict, List
 from PySide6.QtCore import QThread, Signal, QObject
 from pokerkit import HandHistory
@@ -61,6 +62,42 @@ def extract_table_name(file_path: str) -> Optional[str]:
 
     return None
 
+def extract_seats_from_content(content: str) -> Dict[str, int]:
+    """
+    Извлекает карту {Имя: Номер_Места} из последней раздачи в тексте.
+    """
+    seat_map = {}
+    # Разбиваем по заголовкам раздач и берем последнюю
+    hands = content.split("PokerStars Hand #")
+    if not hands:
+        return {}
+    last_hand_text = "PokerStars Hand #" + hands[-1]
+    
+    # Ограничиваем поиск только заголовком раздачи (до карт или саммари),
+    # чтобы исключить строки типа "Seat 1: Player (button) collected..."
+    if "*** HOLE CARDS ***" in last_hand_text:
+        header_text = last_hand_text.split("*** HOLE CARDS ***")[0]
+    elif "*** SUMMARY ***" in last_hand_text:
+        header_text = last_hand_text.split("*** SUMMARY ***")[0]
+    else:
+        header_text = last_hand_text
+
+    pattern = re.compile(r"^Seat (\d+): (.+?) \(", re.MULTILINE)
+    matches = pattern.findall(header_text)
+    
+    for seat_str, player_name in matches:
+        # Очистка имени от возможных артефактов (например, "Player (button)")
+        clean_name = player_name.strip()
+        if clean_name.endswith(" (button)"):
+            clean_name = clean_name.replace(" (button)", "").strip()
+        elif clean_name.endswith(" (small blind)"):
+            clean_name = clean_name.replace(" (small blind)", "").strip()
+        elif clean_name.endswith(" (big blind)"):
+            clean_name = clean_name.replace(" (big blind)", "").strip()
+            
+        seat_map[clean_name] = int(seat_str)
+        
+    return seat_map
 
 def process_file_update(file_path: str, filter_segment: Optional[str] = None, filter_date: Optional[str] = None) -> Optional[StatUpdateData]:
     """
@@ -122,7 +159,7 @@ def process_file_update(file_path: str, filter_segment: Optional[str] = None, fi
                 print(f"   [LOAD] Пропуск {date_segment} -> Ранее: {filter_dt}")
                 return
 
-        last_players_committed = set() # Хранит игроков последней обработанной раздачи
+        last_hand_seat_map = {} # Хранит карту мест последней раздачи
 
         # 2. Обработка и запись в БД
         for i, hh in enumerate(hhs_list): # Используем enumerate для отслеживания последней раздачи
@@ -130,19 +167,19 @@ def process_file_update(file_path: str, filter_segment: Optional[str] = None, fi
             update_stats_in_db(stats_to_commit, table_segment)
             player_stats_to_commit = analyze_player_stats(hh, MY_PLAYER_NAME)
             update_hand_stats_in_db(player_stats_to_commit)
-            # --- ИСПРАВЛЕНИЕ ОШИБКИ: Используем надежные ключи (имена-строки) ---
-            current_hand_players = set(stats_to_commit.keys())
-
-            # Если это последняя раздача в списке, сохраняем ее игроков
-            if i == len(hhs_list) - 1:
-                 last_players_committed = current_hand_players
-            # --------------------------------------------------------------------
-
+        
+        # 3. Извлекаем точные места игроков из текста последней раздачи
+        # Мы делаем это отдельно от pokerkit, чтобы гарантировать наличие номеров мест
+        last_hand_seat_map = extract_seats_from_content(new_content)
+        
+        # Если не удалось извлечь (например, формат изменился), берем просто список имен из последней hh
+        if not last_hand_seat_map and hhs_list:
+             last_hand_seat_map = {p: 0 for p in hhs_list[-1].players}
 
         FILE_SIZES[file_path] = current_size
 
-        # 3. ВОЗВРАЩАЕМ 4 ЗНАЧЕНИЯ (игроки только из последней раздачи)
-        return (file_path, list(last_players_committed), table_title_part, table_segment)
+        # 4. ВОЗВРАЩАЕМ данные (теперь со словарем мест)
+        return (file_path, last_hand_seat_map, table_title_part, table_segment)
 
     except Exception as e:
         print(f"❌ Критическая ошибка парсинга в {os.path.basename(file_path)}: {e}")

@@ -15,7 +15,7 @@ FILE_SIZES: Dict[str, int] = {}
 
 MY_PLAYER_NAME = "Martyr40"
 # Структура для передачи данных: (file_path, list_of_player_names, table_title_part, table_segment)
-StatUpdateData = Tuple[str, List[str], str, str]
+StatUpdateData = Tuple[str, Dict[str, int], str, str]
 
 ACTION_POSITIONS = ["utg", "mp", "co", "bu"]
 

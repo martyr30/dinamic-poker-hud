@@ -28,32 +28,44 @@ class HUDWindow(QWidget):
         self.setWindowTitle(f"HUD Tracker - {target_title_part}")
         self.setWindowFlags(
             Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.FramelessWindowHint #|
-            # Qt.WindowType.Tool
+            Qt.WindowType.FramelessWindowHint |
+            Qt.WindowType.WindowDoesNotAcceptFocus |
+            Qt.WindowType.WindowTransparentForInput
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        self.setStyleSheet("background-color: rgba(0, 0, 0, 150); border-radius: 5px;")
+        # ВАЖНО: Делаем окно прозрачным для событий мыши, чтобы можно было кликать по столу сквозь HUD
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating)
+        
+        # Убираем общий фон окна, теперь фон будет только у плашек игроков
+        self.setStyleSheet("background-color: transparent;")
 
-        self.main_layout = QVBoxLayout(self)
-        self.main_layout.setContentsMargins(5, 5, 5, 5)
-        self.main_layout.setSpacing(2)
+        # Используем абсолютное позиционирование (без Layout)
+        # self.main_layout = QVBoxLayout(self) 
 
         self.status_label = QLabel(f"Ожидание окна: {target_title_part}...")
         font = QFont("Arial", 14, QFont.Weight.Bold)
-        self.status_label.setFont(font)
-        self.status_label.setStyleSheet("color: white;")
-        self.main_layout.addWidget(self.status_label)
+        self.status_label.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        self.status_label.setStyleSheet("background-color: rgba(0, 0, 0, 100); color: white; padding: 5px; border-radius: 5px;")
+        self.status_label.setParent(self) # Привязываем к окну
+        self.status_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
+        self.status_label.move(10, 10)
+        self.status_label.show()
 
         # --- Хранилище ---
         self.target_window = None
-        self.tracking_offset_x = 20
-        self.tracking_offset_y = 60
+        # Смещения теперь 0, так как мы перекрываем окно целиком
+        self.tracking_offset_x = 0
+        self.tracking_offset_y = 0
 
         # Идентификаторы стола
         self.file_path = file_path
         self.active_table_name: str = target_title_part
         self.active_table_segment: Optional[str] = None
-        self.current_table_players: List[str] = []
+        self.current_table_players: Dict[str, int] = {} # Имя -> Номер места
+        
+        # Виджеты для игроков (храним ссылки на QLabel)
+        self.player_widgets: Dict[str, QLabel] = {}
 
         self.hide()
 
@@ -160,27 +172,40 @@ class HUDWindow(QWidget):
         # 5. ⚪ Белый/Серый (Дефолт / Неопределенный)
         return "white"
 
-    def _clear_hud_widgets(self):
-        while self.main_layout.count() > 0:
-            item = self.main_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
+    def _clear_player_widgets(self):
+        for widget in self.player_widgets.values():
+            widget.deleteLater()
+        self.player_widgets.clear()
 
     def _update_label_content(self):
         player_stats = {}
-        if self.active_table_segment:
-             player_stats = get_stats_for_players(self.current_table_players, self.active_table_segment)
+        player_names = list(self.current_table_players.keys())
+        
+        if self.active_table_segment and player_names:
+             player_stats = get_stats_for_players(player_names, self.active_table_segment)
 
-        self._clear_hud_widgets()
-        font = QFont("Arial", 14, QFont.Weight.Bold)
+        self._clear_player_widgets()
+        font = QFont("Arial", 13, QFont.Weight.Bold)
 
         if not self.current_table_players:
             table_info = f"Стол: {self.active_table_name}\nСегмент: {self.active_table_segment}" if self.active_table_name else "Неизвестно"
             self.status_label.setText(f"{table_info}\nОжидание игроков...")
-            self.main_layout.addWidget(self.status_label)
+            self.status_label.adjustSize()
+            self.status_label.show()
         else:
-            for name in self.current_table_players:
+            self.status_label.hide() # Скрываем статус, когда есть игроки
+            
+            # 1. Находим место Хиро (Martyr40)
+            hero_seat = self.current_table_players.get(MY_PLAYER_NAME, 0)
+            # Если Хиро нет за столом (наблюдатель), считаем, что он на месте 0 (или 1) для отсчета
+            if hero_seat == 0:
+                # Пытаемся найти хоть какое-то место для отсчета, или оставляем 0
+                pass
+
+            for name, seat_num in self.current_table_players.items():
+                # Пропускаем самого себя, если не хотим видеть свой HUD (или оставляем)
+                # if name == MY_PLAYER_NAME: continue
+
                 data = player_stats.get(name, {
                     'vpip': '0.0', 'pfr': '0.0',
                     '3bet': '0.0', 'f3bet': '0.0',
@@ -206,23 +231,111 @@ class HUDWindow(QWidget):
                 color_code = self._get_player_color(vpip_val, pfr_val, hands_val)
 
                 hud_line = (
-                    f"{name}: {data['vpip']}/{data['pfr']} "
-                    f"| 3B: {data['3bet']}/F3B: {data['f3bet']} | AF: {data.get('af', '0.0')} ({data['hands']})"
+                    f"{name} ({data['hands']})\n"
+                    f"{data['vpip']}/{data['pfr']}\n"
+                    f"3B:{data['3bet']} F3B:{data['f3bet']}\n"
+                    f"AF:{data.get('af', '0.0')}"
                 )
 
                 player_label = QLabel(hud_line)
+                player_label.setParent(self) # Обязательно привязываем к окну
+                # Делаем метку прозрачной для кликов мыши
+                player_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
                 player_label.setFont(font)
-                player_label.setStyleSheet(f"color: {color_code};")
-                self.main_layout.addWidget(player_label)
+                # Полупрозрачный фон для читаемости
+                player_label.setStyleSheet(f"background-color: rgba(0, 0, 0, 100); color: {color_code}; padding: 4px; border-radius: 4px;")
+                player_label.adjustSize()
+                
+                # Сохраняем виджет и его логические координаты (место)
+                self.player_widgets[name] = player_label
+                
+                # Позиционируем
+                self._place_widget(player_label, seat_num, hero_seat)
+                player_label.show()
 
-        self.adjustSize()
+        # self.adjustSize() # Больше не нужно, так как окно фиксировано по размеру стола
+
+    def reposition_all_widgets(self):
+        """Пересчитывает и применяет позиции для всех существующих виджетов игроков."""
+        if not self.current_table_players:
+            return
+
+        hero_seat = self.current_table_players.get(MY_PLAYER_NAME, 0)
+
+        for name, widget in self.player_widgets.items():
+            seat_num = self.current_table_players.get(name)
+            if seat_num is not None:
+                self._place_widget(widget, seat_num, hero_seat)
+
+    def resizeEvent(self, event):
+        """Перехватывает событие изменения размера окна для перераспределения виджетов."""
+        super().resizeEvent(event)
+        # Вызываем перераспределение каждый раз, когда размер окна меняется.
+        self.reposition_all_widgets()
+
+    def _place_widget(self, widget: QLabel, seat_num: int, hero_seat: int):
+        """
+        Размещает виджет игрока на основе его места и места Хиро.
+        Мы предполагаем 6-макс стол.
+        Позиция 0 - это Низ Центра (Хиро).
+        Остальные позиции идут по часовой стрелке.
+        """
+        if hero_seat == 0:
+            # Если хиро нет, просто используем номер места как позицию (сдвиг -1, т.к. места 1-6)
+            visual_pos = (seat_num - 1) % 6
+        else:
+            # Считаем относительную позицию.
+            # PokerStars места: 1..6.
+            # Если Хиро на месте 3, то место 3 -> поз 0. Место 4 -> поз 1.
+            # Формула: (Seat - HeroSeat) % 6
+            visual_pos = (seat_num - hero_seat) % 6
+
+        # Координаты в процентах от ширины/высоты окна (x, y)
+        # Позиции для 6-макс (примерные, можно подстроить)
+        # 0: Низ (Хиро)
+        # 1: Лево Низ
+        # 2: Лево Верх
+        # 3: Верх
+        # 4: Право Верх
+        # 5: Право Низ
+        
+        pos_map = {
+            0: (0.50, 0.88), # Hero
+            1: (0.08, 0.65), # Left Bottom
+            2: (0.08, 0.25), # Left Top
+            3: (0.50, 0.12), # Top
+            4: (0.92, 0.25), # Right Top
+            5: (0.92, 0.65), # Right Bottom
+        }
+        
+        rel_x, rel_y = pos_map.get(visual_pos, (0.5, 0.5))
+        
+        # Вычисляем абсолютные координаты
+        # Центрируем виджет относительно точки
+        x = int(self.width() * rel_x - widget.width() / 2)
+        y = int(self.height() * rel_y - widget.height() / 2)
+        
+        widget.move(x, y)
 
     @Slot(object)
     def update_data(self, data: StatUpdateData):
         """Слот для приема данных от MonitorThread."""
-        _, player_names, _, table_segment = data
+        _, new_seat_map, _, table_segment = data
 
-        self.current_table_players = player_names
+        # ЛОГИКА СОХРАНЕНИЯ (PERSISTENCE):
+        # Если место было занято, а в новой раздаче оно пустое (или пропущено),
+        # мы оставляем старого игрока. Новые данные перезаписывают старые.
+        
+        # 1. Инвертируем текущую карту (Seat -> Name) и новую карту
+        current_seats = {seat: name for name, seat in self.current_table_players.items()}
+        new_seats = {seat: name for name, seat in new_seat_map.items()}
+        
+        # 2. Обновляем текущие места новыми (новые имеют приоритет)
+        current_seats.update(new_seats)
+        
+        # 3. Возвращаем в формат Name -> Seat
+        self.current_table_players = {name: seat for seat, name in current_seats.items()}
+        
         self.active_table_segment = table_segment
 
         self._update_label_content()
@@ -289,7 +402,12 @@ class HUDWindow(QWidget):
         # 6. Вычисляем и перемещаем HUD
         new_x = target_x + self.tracking_offset_x
         new_y = target_y + self.tracking_offset_y
-
+        
+        # 6.1 Также обновляем РАЗМЕР HUD, чтобы он совпадал с окном стола
+        new_w = self.target_window.width
+        new_h = self.target_window.height
+        
+        self.resize(new_w, new_h)
         # 7. ДИАГНОСТИЧЕСКИЙ ВЫВОД (Оставляем, пока не попросите убрать)
         # print(f"--- 📍 HUD Диагностика [{self.active_table_name}] ---")
         # print(f"Окно (X, Y): ({target_x}, {target_y})")
