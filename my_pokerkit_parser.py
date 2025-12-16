@@ -34,7 +34,7 @@ class CustomPokerStarsParser(PokerStarsParser):
                 compile(r'Seat \d+: '
                         r'(?P<player>.+?)'  # Нежадно захватываем имя игрока до...
                         # Пропускаем любой текст до нужной нам конструкции
-                        r' (?:showed|won|\(small blind\)|\(big blind\)|mucked).* won \(\D?(?P<winnings>[0-9.,]+)\)'),
+                        r' (?:showed|won|\(small blind\)|\(big blind\)|\(button\)|mucked).* won \(\D?(?P<winnings>[0-9.,]+)\)'),
             ),
             None,  # parse_pattern (используется parse_value по умолчанию)
             int,   # default_value_factory
@@ -98,6 +98,7 @@ class CustomPokerStarsParser(PokerStarsParser):
 
         # Возвращаем только активных игроков
         active_players = all_players_at_table - sitting_out_players
+        
         return active_players
 
     # Переопределяем метод парсинга действий
@@ -121,7 +122,7 @@ class CustomPokerStarsParser(PokerStarsParser):
             line for line in s.splitlines()
             if not any(pattern.match(line) for pattern in self.IGNORED_ACTION_PATTERNS)
         ]
-
+        
         for i, line in enumerate(filtered_lines):
             action = None
 
@@ -148,7 +149,7 @@ class CustomPokerStarsParser(PokerStarsParser):
 
             if action is not None:
                 actions.append(action)
-
+        
         return actions
 
     # Этот метод нужен, чтобы PLAYER_VARIABLES мог обрабатывать кортеж из выражений
