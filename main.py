@@ -184,6 +184,7 @@ class HUDWindow(QWidget):
                 data = player_stats.get(name, {
                     'vpip': '0.0', 'pfr': '0.0',
                     '3bet': '0.0', 'f3bet': '0.0',
+                    'af': '0.0',
                     'hands': 0
                 })
 
@@ -206,7 +207,7 @@ class HUDWindow(QWidget):
 
                 hud_line = (
                     f"{name}: {data['vpip']}/{data['pfr']} "
-                    f"| 3B: {data['3bet']}/F3B: {data['f3bet']} ({data['hands']})"
+                    f"| 3B: {data['3bet']}/F3B: {data['f3bet']} | AF: {data.get('af', '0.0')} ({data['hands']})"
                 )
 
                 player_label = QLabel(hud_line)
