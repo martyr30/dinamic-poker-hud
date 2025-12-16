@@ -3,6 +3,7 @@
 import sqlite3
 import decimal
 import datetime
+import sys
 from typing import Dict, Any, List, Optional
 from decimal import Decimal
 from pokerkit import HandHistory
@@ -54,7 +55,10 @@ def setup_database_table(table_segment: str):
                 rfi_succ_utg INTEGER DEFAULT 0,
                 rfi_succ_mp INTEGER DEFAULT 0,
                 rfi_succ_co INTEGER DEFAULT 0,
-                rfi_succ_bu INTEGER DEFAULT 0
+                rfi_succ_bu INTEGER DEFAULT 0,
+
+                af_bets_raises INTEGER DEFAULT 0,
+                af_calls INTEGER DEFAULT 0
             )
         """)
 
@@ -154,16 +158,24 @@ def analyze_hand_for_stats(hand_history: HandHistory):
             'rfi_succ_utg': 0,
             'rfi_succ_mp': 0,
             'rfi_succ_co': 0,
-            'rfi_succ_bu': 0
+            'rfi_succ_bu': 0,
+            'af_bets_raises': 0, # Счётчик агрессивных действий (Bet/Raise) на постфлопе
+            'af_calls': 0        # Счётчик коллов на постфлопе
         }
 
     # --- Отслеживание префлоп-действий ---
     state = '0rfi' # 0rfi, 0bet, 2bet, 3bet
 
     # 1. Первый проход: Основные действия и определение 3-бетов
+    is_postflop = False
+    postflop_has_bet = False # Был ли бет на текущей улице постфлопа (чтобы отличить Call от Check)
+
     for action_str in hand_history.actions:
-        if action_str.startswith('d db'): # Конец префлопа
-            break
+        # Проверяем смену улицы (Флоп, Терн, Ривер)
+        if action_str.startswith('d db'):
+            is_postflop = True
+            postflop_has_bet = False # Сброс флага ставки для новой улицы
+            continue
 
         if action_str.startswith('p'):
             parts = action_str.split()
@@ -177,42 +189,58 @@ def analyze_hand_for_stats(hand_history: HandHistory):
             key_to_update = 'hands_' + player_map.get(player_code)[1]
             stats_update[player_name][key_to_update] = 1
 
-            # --- RFI ---
-            if state == '0rfi' and player_map.get(player_code)[1] in ('utg', 'mp', 'co', 'bu'):
-                key_to_update = 'rfi_opp_' + player_map.get(player_code)[1]
-                stats_update[player_name][key_to_update] = 1
-                if action_type_code != 'f':
-                    state = '0bet'
-                    key_to_update = 'rfi_succ_' + player_map.get(player_code)[1]
+            # --- ЛОГИКА ПРЕФЛОПА (RFI, PFR, 3Bet) ---
+            if not is_postflop:
+                # --- RFI ---
+                if state == '0rfi' and player_map.get(player_code)[1] in ('utg', 'mp', 'co', 'bu'):
+                    key_to_update = 'rfi_opp_' + player_map.get(player_code)[1]
+                    stats_update[player_name][key_to_update] = 1
+                    if action_type_code != 'f':
+                        state = '0bet'
+                        key_to_update = 'rfi_succ_' + player_map.get(player_code)[1]
+                        stats_update[player_name][key_to_update] = 1
+
+                # --- PFR (Pre-Flop Raise) ---
+                # rbr (Raise) - это PFR только на префлопе
+                if action_type_code in ('cbr'):
+                    stats_update[player_name]['pfr'] = True
+                    key_to_update = 'pfr_' + player_map.get(player_code)[1]
                     stats_update[player_name][key_to_update] = 1
 
-            # --- VPIP/PFR (Ваша логика) ---
-            # cc (Call), rbr (Bet/Raise) - это VPIP
+                # --- 3BET ЛОГИКА ---
+                if state in ('0bet', '0rfi'):
+                    if action_type_code == 'cbr':
+                        state = '2bet'
+                elif state == '2bet':
+                    if action_type_code == 'cbr':
+                        stats_update[player_name]['3bet_opp'] = 1
+                        stats_update[player_name]['3bet_success'] = 1
+                        state = '3bet'
+                    else:
+                        stats_update[player_name]['3bet_opp'] = 1
+                elif state == '3bet':
+                    if action_type_code == 'f':
+                        stats_update[player_name]['f3bet_opp'] = 1
+                        stats_update[player_name]['f3bet_success'] = 1
+                    else:
+                        stats_update[player_name]['f3bet_opp'] = 1
+
+            # --- ЛОГИКА ПОСТФЛОПА (AF - Aggression Factor) ---
+            else:
+                # AF = (Bets + Raises) / Calls
+                if action_type_code == 'cbr': # Bet или Raise
+                    stats_update[player_name]['af_bets_raises'] += 1
+                    postflop_has_bet = True
+                elif action_type_code == 'cc':
+                    # Если была ставка, то 'cc' это Call. Если нет - это Check.
+                    # AF учитывает только Calls. Checks игнорируются.
+                    if postflop_has_bet:
+                        stats_update[player_name]['af_calls'] += 1
+
+            # --- VPIP (Voluntarily Put Money In Pot) ---
+            # Считается на любой улице (если игрок вложил деньги добровольно)
             if action_type_code in ('cc', 'cbr'):
                 stats_update[player_name]['vpip'] = True
-            # rbr (Raise) - это PFR
-            if action_type_code in ('cbr'):
-                stats_update[player_name]['pfr'] = True
-                key_to_update = 'pfr_' + player_map.get(player_code)[1]
-                stats_update[player_name][key_to_update] = 1
-
-            # --- 3BET ЛОГИКА ---
-            if state in ('0bet', '0rfi'):
-                if action_type_code == 'cbr':
-                    state = '2bet'
-            elif state == '2bet':
-                if action_type_code == 'cbr':
-                    stats_update[player_name]['3bet_opp'] = 1
-                    stats_update[player_name]['3bet_success'] = 1
-                    state = '3bet'
-                else:
-                    stats_update[player_name]['3bet_opp'] = 1
-            elif state == '3bet':
-                if action_type_code == 'f':
-                    stats_update[player_name]['f3bet_opp'] = 1
-                    stats_update[player_name]['f3bet_success'] = 1
-                else:
-                    stats_update[player_name]['f3bet_opp'] = 1
 
     # 2. Финальная агрегация (для очистки булевых значений)
     final_stats = {}
@@ -244,7 +272,9 @@ def analyze_hand_for_stats(hand_history: HandHistory):
             'rfi_succ_utg': data['rfi_succ_utg'],
             'rfi_succ_mp': data['rfi_succ_mp'],
             'rfi_succ_co': data['rfi_succ_co'],
-            'rfi_succ_bu': data['rfi_succ_bu']
+            'rfi_succ_bu': data['rfi_succ_bu'],
+            'af_bets_raises': data['af_bets_raises'],
+            'af_calls': data['af_calls']
         }
     # print("ALL players stats:")
     # print(final_stats)
@@ -493,6 +523,9 @@ def update_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]], table_segment
             rfi_succ_co = data.get('rfi_succ_co', 0)
             rfi_succ_bu = data.get('rfi_succ_bu', 0)
 
+            af_bets_raises = data.get('af_bets_raises', 0)
+            af_calls = data.get('af_calls', 0)
+
             # print('INSERT')
             # print(player_name)
             # print(is_vpip)
@@ -507,8 +540,9 @@ def update_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]], table_segment
                     hands_utg, hands_mp, hands_co, hands_bu, hands_sb,
                     rfi_opp_utg, rfi_opp_mp, rfi_opp_co, rfi_opp_bu,
                     rfi_succ_utg, rfi_succ_mp, rfi_succ_co, rfi_succ_bu
+                    , af_bets_raises, af_calls
                     )
-                VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(player_name) DO UPDATE SET
                     hands = hands + 1,
                     vpip_hands = vpip_hands + excluded.vpip_hands,
@@ -534,13 +568,16 @@ def update_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]], table_segment
                     rfi_succ_utg = rfi_succ_utg + excluded.rfi_succ_utg,
                     rfi_succ_mp = rfi_succ_mp + excluded.rfi_succ_mp,
                     rfi_succ_co = rfi_succ_co + excluded.rfi_succ_co,
-                    rfi_succ_bu = rfi_succ_bu + excluded.rfi_succ_bu
+                    rfi_succ_bu = rfi_succ_bu + excluded.rfi_succ_bu,
+                    af_bets_raises = af_bets_raises + excluded.af_bets_raises,
+                    af_calls = af_calls + excluded.af_calls
             """, (
                     player_name, is_vpip, is_pfr, o3bet, s3bet, of3bet, sf3bet,
                     pfr_utg, pfr_mp, pfr_co, pfr_bu, pfr_sb,
                     hands_utg, hands_mp, hands_co, hands_bu, hands_sb,
                     rfi_opp_utg, rfi_opp_mp, rfi_opp_co, rfi_opp_bu,
-                    rfi_succ_utg, rfi_succ_mp, rfi_succ_co, rfi_succ_bu
+                    rfi_succ_utg, rfi_succ_mp, rfi_succ_co, rfi_succ_bu,
+                    af_bets_raises, af_calls
                  )
             )
 
@@ -607,14 +644,15 @@ def get_stats_for_players(player_names: List[str], table_segment: str) -> Dict[s
         cursor.execute(f"""
             SELECT player_name, hands, vpip_hands, pfr_hands,
                    _3bet_opportunities, _3bet_successes,
-                   _fold_to_3bet_opportunities, _fold_to_3bet_successes
+                   _fold_to_3bet_opportunities, _fold_to_3bet_successes,
+                   af_bets_raises, af_calls
             FROM {safe_table_name}
             WHERE player_name IN ({placeholders})
         """, player_names)
 
         results = cursor.fetchall()
 
-        for name, hands, vpip_hands, pfr_hands, o3bet, s3bet, of3bet, sf3bet in results:
+        for name, hands, vpip_hands, pfr_hands, o3bet, s3bet, of3bet, sf3bet, af_bets, af_calls in results:
             vpip = (vpip_hands / hands * 100) if hands > 0 else 0.0
             pfr = (pfr_hands / hands * 100) if hands > 0 else 0.0
 
@@ -622,11 +660,23 @@ def get_stats_for_players(player_names: List[str], table_segment: str) -> Dict[s
             _3bet_percent = (s3bet / o3bet * 100) if o3bet > 0 else 0.0
             f3bet_percent = (sf3bet / of3bet * 100) if of3bet > 0 else 0.0
 
+            # РАСЧЕТ AF (Aggression Factor)
+            # AF = (Bets + Raises) / Calls
+            if af_calls > 0:
+                af_val = af_bets / af_calls
+            elif af_bets > 0:
+                # Если коллов 0, а ставки были, AF математически бесконечен.
+                # Обычно отображают как высокое число или Inf.
+                af_val = 99.9
+            else:
+                af_val = 0.0
+
             stats[name] = {
                 'vpip': f"{vpip:.1f}",
                 'pfr': f"{pfr:.1f}",
                 '3bet': f"{_3bet_percent:.1f}",       # Добавлено
                 'f3bet': f"{f3bet_percent:.1f}",      # Добавлено
+                'af': f"{af_val:.1f}",                # Добавлено (AF)
                 'hands': hands
             }
 
