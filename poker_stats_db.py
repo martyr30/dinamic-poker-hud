@@ -58,9 +58,29 @@ def setup_database_table(table_segment: str):
                 rfi_succ_bu INTEGER DEFAULT 0,
 
                 af_bets_raises INTEGER DEFAULT 0,
-                af_calls INTEGER DEFAULT 0
+                af_calls INTEGER DEFAULT 0,
+
+                cbet_flop_opp INTEGER DEFAULT 0,
+                cbet_flop_succ INTEGER DEFAULT 0,
+                fcbet_flop_opp INTEGER DEFAULT 0,
+                fcbet_flop_succ INTEGER DEFAULT 0,
+                wtsd_hands INTEGER DEFAULT 0,
+                wsd_hands INTEGER DEFAULT 0
             )
         """)
+
+        # МИГРАЦИЯ: Добавляем колонки, если таблица уже существовала без них
+        columns_to_add = [
+            "cbet_flop_opp", "cbet_flop_succ",
+            "fcbet_flop_opp", "fcbet_flop_succ",
+            "wtsd_hands", "wsd_hands"
+        ]
+        for col in columns_to_add:
+            try:
+                cursor.execute(f"ALTER TABLE {safe_table_name} ADD COLUMN {col} INTEGER DEFAULT 0")
+            except sqlite3.OperationalError:
+                # Колонка уже существует
+                pass
 
         # 🌟 2. НОВАЯ ТАБЛИЦА: Лог сыгранных раздач
         conn.execute(f"""
@@ -165,16 +185,32 @@ def analyze_hand_for_stats(hand_history: HandHistory):
 
     # --- Отслеживание префлоп-действий ---
     state = '0rfi' # 0rfi, 0bet, 2bet, 3bet
+    # Для C-Bet нам нужно знать, кто был агрессором на предыдущей улице
+    preflop_aggressor = None # Имя игрока
+    last_raiser = None
 
-    # 1. Первый проход: Основные действия и определение 3-бетов
+    # Для WTSD отслеживаем активных игроков
+    active_players = set(all_players)
+
+    # 1. Основной цикл по действиям
     is_postflop = False
-    postflop_has_bet = False # Был ли бет на текущей улице постфлопа (чтобы отличить Call от Check)
+    current_street = 'preflop' # preflop, flop, turn, river
+    postflop_has_bet = False
+    flop_cbet_made = False # Чтобы отследить Fold to CBet
 
     for action_str in hand_history.actions:
-        # Проверяем смену улицы (Флоп, Терн, Ривер)
+        # Проверяем смену улицы
         if action_str.startswith('d db'):
             is_postflop = True
-            postflop_has_bet = False # Сброс флага ставки для новой улицы
+            postflop_has_bet = False
+            # Переход на новую улицу
+            if current_street == 'preflop':
+                current_street = 'flop'
+                preflop_aggressor = last_raiser # Фиксируем агрессора
+            elif current_street == 'flop':
+                current_street = 'turn'
+            elif current_street == 'turn':
+                current_street = 'river'
             continue
 
         if action_str.startswith('p'):
@@ -186,11 +222,18 @@ def analyze_hand_for_stats(hand_history: HandHistory):
             if not player_name:
                 continue
 
+            # Обновление WTSD (если фолд, выбывает)
+            if action_type_code == 'f':
+                active_players.discard(player_name)
+            
             key_to_update = 'hands_' + player_map.get(player_code)[1]
             stats_update[player_name][key_to_update] = 1
 
             # --- ЛОГИКА ПРЕФЛОПА (RFI, PFR, 3Bet) ---
             if not is_postflop:
+                if action_type_code == 'cbr':
+                    last_raiser = player_name # Обновляем последнего агрессора
+
                 # --- RFI ---
                 if state == '0rfi' and player_map.get(player_code)[1] in ('utg', 'mp', 'co', 'bu'):
                     key_to_update = 'rfi_opp_' + player_map.get(player_code)[1]
@@ -200,9 +243,8 @@ def analyze_hand_for_stats(hand_history: HandHistory):
                         key_to_update = 'rfi_succ_' + player_map.get(player_code)[1]
                         stats_update[player_name][key_to_update] = 1
 
-                # --- PFR (Pre-Flop Raise) ---
-                # rbr (Raise) - это PFR только на префлопе
-                if action_type_code in ('cbr'):
+                # --- PFR ---
+                if action_type_code == 'cbr':
                     stats_update[player_name]['pfr'] = True
                     key_to_update = 'pfr_' + player_map.get(player_code)[1]
                     stats_update[player_name][key_to_update] = 1
@@ -225,22 +267,74 @@ def analyze_hand_for_stats(hand_history: HandHistory):
                     else:
                         stats_update[player_name]['f3bet_opp'] = 1
 
-            # --- ЛОГИКА ПОСТФЛОПА (AF - Aggression Factor) ---
+            # --- ЛОГИКА ПОСТФЛОПА ---
             else:
+                # --- C-BET FLOP ---
+                if current_street == 'flop':
+                    # Возможность К-бета есть у префлоп-агрессора, если перед ним никто не ставил
+                    if player_name == preflop_aggressor and not postflop_has_bet:
+                        stats_update[player_name]['cbet_flop_opp'] = 1
+                        if action_type_code == 'cbr':
+                            stats_update[player_name]['cbet_flop_succ'] = 1
+                            flop_cbet_made = True
+                    
+                    # --- FOLD TO C-BET FLOP ---
+                    # Если был сделан К-бет, следующий игрок имеет возможность сфолдить
+                    if flop_cbet_made and not stats_update[player_name].get('cbet_flop_succ', 0): 
+                         # Исключаем самого агрессора
+                        if player_name != preflop_aggressor:
+                             # Чтобы не засчитывать несколько раз, можно проверять флаг
+                             # Но здесь упрощенно: любое действие после CBet - это реакция
+                             # Сложно: CBet мог быть мультипот.
+                             # Упрощение: Считаем реакцию ПЕРВОГО оппонента, или всех?
+                             # Обычно Fold to CBet считается для всех, кто столкнулся с CBet.
+                             # Если CBet был, и игрок делает действие:
+                             #  - Fold -> Opp=1, Succ=1
+                             #  - Call/Raise -> Opp=1, Succ=0
+                             # Нужно убедиться, что мы еще не засчитали этому игроку реакцию на этой улице
+                             if 'f2cbet_counted' not in stats_update[player_name]:
+                                 stats_update[player_name]['fcbet_flop_opp'] = 1
+                                 stats_update[player_name]['f2cbet_counted'] = True
+                                 if action_type_code == 'f':
+                                     stats_update[player_name]['fcbet_flop_succ'] = 1
+
+
                 # AF = (Bets + Raises) / Calls
                 if action_type_code == 'cbr': # Bet или Raise
                     stats_update[player_name]['af_bets_raises'] += 1
                     postflop_has_bet = True
                 elif action_type_code == 'cc':
-                    # Если была ставка, то 'cc' это Call. Если нет - это Check.
-                    # AF учитывает только Calls. Checks игнорируются.
                     if postflop_has_bet:
                         stats_update[player_name]['af_calls'] += 1
 
-            # --- VPIP (Voluntarily Put Money In Pot) ---
-            # Считается на любой улице (если игрок вложил деньги добровольно)
+            # --- VPIP ---
             if action_type_code in ('cc', 'cbr'):
                 stats_update[player_name]['vpip'] = True
+
+    # --- WTSD & WSD ---
+    # В конце раздачи active_players содержит тех, кто дошел до шоудауна (или выиграл без шоудауна, 
+    # если все остальные сфолдили, но hand_history.winnings покажет это)
+    # WTSD: Игрок не сфолдил.
+    # WSD: Игрок выиграл > 0.
+    
+    # Чтобы отличить "все сфолдили" от "шоудауна", проверим, сколько активных игроков.
+    # Если > 1, то был шоудаун.
+    # Если 1, то победа без шоудауна (обычно WTSD не считается, но зависит от трактовки.
+    # GTO Wizard/HM3: WTSD = Went to Showdown. Если все сфолдили, никто не дошел до ШД.)
+    
+    was_showdown = len(active_players) > 1
+    
+    if was_showdown:
+        for p_name in active_players:
+            stats_update[p_name]['wtsd'] = True
+            
+            # Проверяем выигрыш
+            try:
+                p_index = hand_history.players.index(p_name)
+                if hand_history.winnings and hand_history.winnings[p_index] > 0:
+                    stats_update[p_name]['wsd'] = True
+            except ValueError:
+                pass
 
     # 2. Финальная агрегация (для очистки булевых значений)
     final_stats = {}
@@ -273,6 +367,12 @@ def analyze_hand_for_stats(hand_history: HandHistory):
             'rfi_succ_mp': data['rfi_succ_mp'],
             'rfi_succ_co': data['rfi_succ_co'],
             'rfi_succ_bu': data['rfi_succ_bu'],
+            'cbet_flop_opp': data.get('cbet_flop_opp', 0),
+            'cbet_flop_succ': data.get('cbet_flop_succ', 0),
+            'fcbet_flop_opp': data.get('fcbet_flop_opp', 0),
+            'fcbet_flop_succ': data.get('fcbet_flop_succ', 0),
+            'wtsd': data.get('wtsd', False),
+            'wsd': data.get('wsd', False),
             'af_bets_raises': data['af_bets_raises'],
             'af_calls': data['af_calls']
         }
@@ -526,6 +626,13 @@ def update_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]], table_segment
             af_bets_raises = data.get('af_bets_raises', 0)
             af_calls = data.get('af_calls', 0)
 
+            cbet_op = data.get('cbet_flop_opp', 0)
+            cbet_sc = data.get('cbet_flop_succ', 0)
+            fcbet_op = data.get('fcbet_flop_opp', 0)
+            fcbet_sc = data.get('fcbet_flop_succ', 0)
+            wtsd = 1 if data.get('wtsd', False) else 0
+            wsd = 1 if data.get('wsd', False) else 0
+
             # print('INSERT')
             # print(player_name)
             # print(is_vpip)
@@ -540,9 +647,10 @@ def update_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]], table_segment
                     hands_utg, hands_mp, hands_co, hands_bu, hands_sb,
                     rfi_opp_utg, rfi_opp_mp, rfi_opp_co, rfi_opp_bu,
                     rfi_succ_utg, rfi_succ_mp, rfi_succ_co, rfi_succ_bu
-                    , af_bets_raises, af_calls
+                    , af_bets_raises, af_calls,
+                    cbet_flop_opp, cbet_flop_succ, fcbet_flop_opp, fcbet_flop_succ, wtsd_hands, wsd_hands
                     )
-                VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, 1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(player_name) DO UPDATE SET
                     hands = hands + 1,
                     vpip_hands = vpip_hands + excluded.vpip_hands,
@@ -570,14 +678,21 @@ def update_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]], table_segment
                     rfi_succ_co = rfi_succ_co + excluded.rfi_succ_co,
                     rfi_succ_bu = rfi_succ_bu + excluded.rfi_succ_bu,
                     af_bets_raises = af_bets_raises + excluded.af_bets_raises,
-                    af_calls = af_calls + excluded.af_calls
+                    af_calls = af_calls + excluded.af_calls,
+                    cbet_flop_opp = cbet_flop_opp + excluded.cbet_flop_opp,
+                    cbet_flop_succ = cbet_flop_succ + excluded.cbet_flop_succ,
+                    fcbet_flop_opp = fcbet_flop_opp + excluded.fcbet_flop_opp,
+                    fcbet_flop_succ = fcbet_flop_succ + excluded.fcbet_flop_succ,
+                    wtsd_hands = wtsd_hands + excluded.wtsd_hands,
+                    wsd_hands = wsd_hands + excluded.wsd_hands
             """, (
                     player_name, is_vpip, is_pfr, o3bet, s3bet, of3bet, sf3bet,
                     pfr_utg, pfr_mp, pfr_co, pfr_bu, pfr_sb,
                     hands_utg, hands_mp, hands_co, hands_bu, hands_sb,
                     rfi_opp_utg, rfi_opp_mp, rfi_opp_co, rfi_opp_bu,
                     rfi_succ_utg, rfi_succ_mp, rfi_succ_co, rfi_succ_bu,
-                    af_bets_raises, af_calls
+                    af_bets_raises, af_calls,
+                    cbet_op, cbet_sc, fcbet_op, fcbet_sc, wtsd, wsd
                  )
             )
 
@@ -645,20 +760,29 @@ def get_stats_for_players(player_names: List[str], table_segment: str) -> Dict[s
             SELECT player_name, hands, vpip_hands, pfr_hands,
                    _3bet_opportunities, _3bet_successes,
                    _fold_to_3bet_opportunities, _fold_to_3bet_successes,
-                   af_bets_raises, af_calls
+                   af_bets_raises, af_calls,
+                   cbet_flop_opp, cbet_flop_succ,
+                   fcbet_flop_opp, fcbet_flop_succ,
+                   wtsd_hands, wsd_hands
             FROM {safe_table_name}
             WHERE player_name IN ({placeholders})
         """, player_names)
 
         results = cursor.fetchall()
 
-        for name, hands, vpip_hands, pfr_hands, o3bet, s3bet, of3bet, sf3bet, af_bets, af_calls in results:
+        for (name, hands, vpip_hands, pfr_hands, o3bet, s3bet, of3bet, sf3bet, af_bets, af_calls,
+             cbet_op, cbet_sc, fcbet_op, fcbet_sc, wtsd_h, wsd_h) in results:
             vpip = (vpip_hands / hands * 100) if hands > 0 else 0.0
             pfr = (pfr_hands / hands * 100) if hands > 0 else 0.0
 
             # РАСЧЕТ НОВЫХ МЕТРИК
             _3bet_percent = (s3bet / o3bet * 100) if o3bet > 0 else 0.0
             f3bet_percent = (sf3bet / of3bet * 100) if of3bet > 0 else 0.0
+
+            cbet_percent = (cbet_sc / cbet_op * 100) if cbet_op > 0 else 0.0
+            fcbet_percent = (fcbet_sc / fcbet_op * 100) if fcbet_op > 0 else 0.0
+            wtsd_percent = (wtsd_h / hands * 100) if hands > 0 else 0.0 # WTSD % от всех рук
+            wsd_percent = (wsd_h / wtsd_h * 100) if wtsd_h > 0 else 0.0 # WSD % от рук, дошедших до вскрытия
 
             # РАСЧЕТ AF (Aggression Factor)
             # AF = (Bets + Raises) / Calls
@@ -674,9 +798,13 @@ def get_stats_for_players(player_names: List[str], table_segment: str) -> Dict[s
             stats[name] = {
                 'vpip': f"{vpip:.1f}",
                 'pfr': f"{pfr:.1f}",
-                '3bet': f"{_3bet_percent:.1f}",       # Добавлено
-                'f3bet': f"{f3bet_percent:.1f}",      # Добавлено
-                'af': f"{af_val:.1f}",                # Добавлено (AF)
+                '3bet': f"{_3bet_percent:.1f}",
+                'f3bet': f"{f3bet_percent:.1f}",
+                'cbet': f"{cbet_percent:.1f}",
+                'fcbet': f"{fcbet_percent:.1f}",
+                'wtsd': f"{wtsd_percent:.1f}",
+                'wsd': f"{wsd_percent:.1f}",
+                'af': f"{af_val:.1f}",
                 'hands': hands
             }
 

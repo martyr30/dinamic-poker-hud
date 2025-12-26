@@ -2,6 +2,11 @@ import sys
 import os
 import signal
 import argparse
+import warnings
+
+# Suppress warnings about 'time_zone_abbreviation' from pokerkit
+warnings.filterwarnings("ignore", message="The field 'time_zone_abbreviation' is an unexpected field")
+
 from typing import Dict, Any, Optional, List
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QSizePolicy
@@ -116,6 +121,9 @@ class HUDWindow(QWidget):
             windows = pwc.getAllWindows()
         except Exception:
             return False
+        except Exception as e:
+            print(f"HUD: Ошибка получения списка окон: {e}")
+            return False
 
         for win in windows:
             if target_part.lower() in win.title.lower():
@@ -126,19 +134,31 @@ class HUDWindow(QWidget):
                 if 'terminal' in app_name.lower() or 'python' in app_name.lower() or 'pycharm' in app_name.lower() or 'code' in app_name.lower():
                     continue
 
-                # *** ЗАЩИТА №1: Игнорировать окна, найденные в (0,0) ***
+                # *** ЗАЩИТА №1: Игнорировать окна, найденные в (0,0), ЕСЛИ они выглядят странно ***
+                # Но для Mac (0,0) может быть валидным.
+                # Поэтому пока используем мягкую проверку.
                 try:
-                    # Если окно в самом верху или слева (например, свернуто/скрыто), пропускаем.
-                    if win.left < 5 and win.top < 5:
+                    # Если окно явно за экраном (очень большие отрицательные координаты)
+                    if win.left < -100 or win.top < -100:
                         continue
                 except Exception:
-                    continue # Окно нестабильно, пропускаем
+                    continue # Окно нестабильно
 
-                self.target_window = win
-                return True
-
-        self.target_window = None
-        return False
+                candidates.append(win)
+        
+        if not candidates:
+            # Выводим отладку только если мы искали конкретный стол и не нашли
+            if self.active_table_name:
+                print(f"HUD DEBUG: Не найдено окно для '{self.active_table_name}'. Видимые окна:")
+                for w_info in debug_window_list:
+                    print(f"  - {w_info}")
+                print("----------------------------------------------------------------")
+            self.target_window = None
+            return False
+        
+        # Если найдено несколько кандидатов, выбираем первый (или можно добавить более сложную логику)
+        self.target_window = candidates[0]
+        return True
 
     def _get_player_color(self, vpip: float, pfr: float, hands: int) -> str:
         """
@@ -209,6 +229,8 @@ class HUDWindow(QWidget):
                 data = player_stats.get(name, {
                     'vpip': '0.0', 'pfr': '0.0',
                     '3bet': '0.0', 'f3bet': '0.0',
+                    'cbet': '0.0', 'fcbet': '0.0',
+                    'wtsd': '0.0', 'wsd': '0.0',
                     'af': '0.0',
                     'hands': 0
                 })
@@ -234,6 +256,8 @@ class HUDWindow(QWidget):
                     f"{name} ({data['hands']})\n"
                     f"{data['vpip']}/{data['pfr']}\n"
                     f"3B:{data['3bet']} F3B:{data['f3bet']}\n"
+                    f"CB:{data['cbet']} FCB:{data['fcbet']}\n"
+                    f"WTSD:{data['wtsd']} WSD:{data['wsd']}\n"
                     f"AF:{data.get('af', '0.0')}"
                 )
 

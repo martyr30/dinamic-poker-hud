@@ -231,6 +231,7 @@ class CustomHandHistory(HandHistory):
     Наш собственный класс HandHistory, который будет использовать
     наш кастомный парсер для PokerStars.
     """
+
     @classmethod
     def from_pokerstars(
             cls,
