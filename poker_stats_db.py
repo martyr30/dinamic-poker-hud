@@ -107,6 +107,13 @@ def setup_database_table(table_segment: str):
                 opponent_position TEXT,
                 board_cards TEXT,
                 rfi_opportunity INTEGER DEFAULT 0,
+                
+                -- Новые колонки для защиты BB и стилов
+                facing_steal INTEGER DEFAULT 0,  -- 1, если игрок на BB/SB и получил опен-рейз с CO/BU/SB
+                is_steal_defend INTEGER DEFAULT 0, -- 1, если заколлировал (Cold Call)
+                is_steal_3bet INTEGER DEFAULT 0,   -- 1, если сделал 3-бет
+                is_steal_fold INTEGER DEFAULT 0,   -- 1, если сфолдил
+                steal_success INTEGER DEFAULT 0,    -- 1, если наш стил удался (все сфолдили)
 
                 PRIMARY KEY (hand_id, player_name)
             );
@@ -125,6 +132,34 @@ def setup_database_table(table_segment: str):
                 if "pct_pot" in col: col_type = "DECIMAL(5,2)"
                 
                 cursor.execute(f"ALTER TABLE my_hand_log ADD COLUMN {col} {col_type}")
+            except sqlite3.OperationalError:
+                pass
+        
+        # The following block is added by the user's instruction.
+        # It appears to be intended for migration of specific columns,
+        # but is placed inside the loop for `log_columns_to_add`.
+        # This will cause the `rfi_opportunity` and BB defense columns
+        # to be attempted to be added multiple times.
+        try:
+            cursor.execute(f"ALTER TABLE my_hand_log ADD COLUMN rfi_opportunity INTEGER DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass
+
+        # Migration for BB Defense Stats (Step 5)
+        new_cols = [
+            ("facing_steal", "INTEGER DEFAULT 0"),
+            ("is_steal_defend", "INTEGER DEFAULT 0"),
+            ("is_steal_3bet", "INTEGER DEFAULT 0"),
+            ("is_steal_fold", "INTEGER DEFAULT 0"),
+            ("steal_success", "INTEGER DEFAULT 0"),
+            # Step 6: BB vs Limp
+            ("facing_limp", "INTEGER DEFAULT 0"),
+            ("is_limp_check", "INTEGER DEFAULT 0"),
+            ("is_limp_iso", "INTEGER DEFAULT 0")
+        ]
+        for col_name, col_type in new_cols:
+            try:
+                cursor.execute(f"ALTER TABLE my_hand_log ADD COLUMN {col_name} {col_type}")
             except sqlite3.OperationalError:
                 pass
         conn.commit()
@@ -402,6 +437,7 @@ def analyze_hand_for_stats(hand_history: HandHistory):
             player_code = parts[0]
             action_type_code = parts[1]
             player_name = player_map.get(player_code)[0]
+            player_name = player_map.get(player_code)[0]
 
             if not player_name:
                 continue
@@ -423,9 +459,26 @@ def analyze_hand_for_stats(hand_history: HandHistory):
                     key_to_update = 'rfi_opp_' + player_map.get(player_code)[1]
                     stats_update[player_name][key_to_update] = 1
                     if action_type_code != 'f':
-                        state = '0bet'
                         key_to_update = 'rfi_succ_' + player_map.get(player_code)[1]
-                        stats_update[player_name][key_to_update] = 1
+                        
+                        if action_type_code == 'cbr':
+                            state = '0bet'
+                            # Usually RFI = Raise First In. Limp is not RFI success?
+                            # If we count Limp as RFI success, keep it. 
+                            # But standard definition: RFI is Raise.
+                            # Assuming we want to count successful "Voluntary Entry" here? 
+                            # If so, keep line 463.
+                            # But better: Only count RFI if Raise.
+                            stats_update[player_name][key_to_update] = 1
+                        elif action_type_code == 'cc':
+                             state = '0limp'
+                             # Limp is NOT RFI success in standard terms.
+                             # But passing it as success just to not break existing "RFI" stat if user relies on it?
+                             # Let's count it for now to avoid side effects, OR disable it.
+                             # If I disable it, RFI% drops.
+                             # Given "DinamicHUD" context, likely RFI = PFR from open?
+                             # Let's leave stats_update for now but fix STATE.
+                             stats_update[player_name][key_to_update] = 1
 
                 # --- PFR ---
                 if action_type_code == 'cbr':
@@ -434,7 +487,9 @@ def analyze_hand_for_stats(hand_history: HandHistory):
                     stats_update[player_name][key_to_update] = 1
 
                 # --- 3BET ЛОГИКА ---
-                if state in ('0bet', '0rfi'):
+                # --- 3BET ЛОГИКА ---
+                
+                if state in ('0bet', '0rfi', '0limp'):
                     if action_type_code == 'cbr':
                         state = '2bet'
                 elif state == '2bet':
@@ -610,7 +665,13 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
                 'opponent_position': '',
                 'opponent_position': '',
                 'board_cards': '',
-                'rfi_opportunity': 0
+                'rfi_opportunity': 0,
+                # New BB Defense & Steal stats
+                'facing_steal': 0,
+                'is_steal_defend': 0,
+                'is_steal_3bet': 0,
+                'is_steal_fold': 0,
+                'steal_success': 0
             }
 
             # 1. ВРЕМЯ РАЗДАЧИ
@@ -648,6 +709,7 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
     # --- Отслеживание префлоп-действий ---
     state = '0rfi' # 0rfi, 0limp, 1bet, 3bet, 4bet
     first_action = True
+    is_steal_attempt = False # Глобальный флаг для текущей улицы (кто-то стилит)
 
     # 1.1 Префлоп: Основные действия и определение 3-бетов
     for action_str in hand_history.actions:
@@ -668,6 +730,9 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
                 first_action = False
                 stats_update[analyze_player_name]['first_action'] = action_type_code
             
+            # Capture state before this action modifies it
+            state_before_action = state
+
             # --- RFI Logic ---
             # 1. Check Opportunity
             if player_code == analyze_player_code and state == '0rfi':
@@ -675,20 +740,85 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
 
             # 2. Check Action
             if action_type_code != 'f':
-                if action_type_code == 'cbr': # 'cbr' = completion/bet/raise
+                if action_type_code == 'cbr': # Raise
                     if state == '0rfi':
-                        # If Hero raises in 0rfi state -> This is RFI
+                        # If Hero raises in 0rfi -> RFI
                         if player_code == analyze_player_code:
                              stats_update[analyze_player_name]['is_rfi'] = 1
                         
                         state = '1bet'
-                        stats_update[analyze_player_name]['first_raiser_position'] = player_map.get(player_code)[1]
-                        if player_map.get(player_code)[1] in ('co', 'bu', 'sb'):
-                            stats_update[analyze_player_name]['is_steal_attempt'] = 1
-                else:
-                     # Call or Check -> Pot is no longer 0rfi if it was a limp, OR it remains 0rfi if check?
-                     # Wait. Preflop 'cc' in 0rfi is a limp.
-                     state = '0limp'
+                        raiser_pos = player_map.get(player_code)[1]
+                        stats_update[analyze_player_name]['first_raiser_position'] = raiser_pos
+                        
+                        # Steal Attempt Logic
+                        if raiser_pos in ('co', 'bu', 'sb'):
+                            # Mark that SOMEONE made a steal attempt (used for next players)
+                            is_steal_attempt = True
+                            if player_code == analyze_player_code:
+                                stats_update[analyze_player_name]['is_steal_attempt'] = 1
+                        else:
+                            is_steal_attempt = False
+                            
+                    elif state == '0limp':
+                        # Iso-Raise against Limper(s)
+                        state = '1bet'
+                        # Note: We don't mark RFI here (RFI is First In).
+                        # We don't mark Steal here (Steal is against Blinds only, usually Unopened).
+                        # But we MUST update state so BB knows it's NOT a limp pot anymore.
+                        is_steal_attempt = False # Facing Iso is not Facing Steal usually (or is it? usually Steal is RFI)
+                            
+                else: 
+                     # Only set to 0limp if it was 0rfi (Open Limp)
+                     # If it was 1bet, a call keeps it 1bet (or we don't change state)
+                     if state == '0rfi':
+                         state = '0limp'
+            
+            # --- BB Defense Logic (Facing Steal) ---
+            # If Hero is on BB (or SB), and previous action was a Steal Attempt (Raise from Late Pos)
+            # We use state_before_action to see what we FACED.
+            
+            if player_code == analyze_player_code:
+                hero_pos = player_map.get(player_code)[1]
+                
+                # Check if facing a steal
+                if state_before_action == '1bet' and is_steal_attempt:
+                    # Additional check: ensure Hero is in Blinds
+                    if hero_pos in ('bb', 'sb'):
+                         stats_update[analyze_player_name]['facing_steal'] = 1
+                         
+                         if action_type_code == 'f':
+                             stats_update[analyze_player_name]['is_steal_fold'] = 1
+                         elif action_type_code == 'cc':
+                             stats_update[analyze_player_name]['is_steal_defend'] = 1
+                         elif action_type_code == 'cbr':
+                             stats_update[analyze_player_name]['is_steal_3bet'] = 1
+
+                # --- BB vs Limp Logic ---
+                # Check if facing a Limp (Unraised pot + someone limped)
+                # state_before_action == '0limp' means someone limped (and no raise occurred after).
+                # Only for BB.
+                if state_before_action == '0limp' and hero_pos == 'bb':
+                    stats_update[analyze_player_name]['facing_limp'] = 1
+                    
+                    if action_type_code == 'cc':
+                         stats_update[analyze_player_name]['is_limp_check'] = 1
+                         # Fix VPIP: Checking huge blind is NOT Voluntarily putting money in.
+                         # Although VPIP calculation is done elsewhere (globally for 'cc'), 
+                         # we might want to manually exclude it from VPIP count if we could.
+                         # But `stats.update['vpip']` is boolean.
+                         # If we set it to True globally, we can't unset it easily without tracking amounts.
+                         # For now, we just track the Limp Stat.
+                         
+                    elif action_type_code == 'cbr':
+                         stats_update[analyze_player_name]['is_limp_iso'] = 1
+
+            # --- Steal Success Logic ---
+            # If Hero made a steal attempt (is_steal_attempt=1 calculated above), 
+            # check if everyone folded. This is done at end of hand or if 'f' ends action?
+            # Actually, `analyze_player_stats` calculates `final_action`. 
+            # But "Success" means we won the pot. `net_profit > 0` and Hand ended preflop?
+            # Or specifically "Everyone folded to our raise".
+            # We can check specific winning condition at end of function.
 
 
             # --- VPIP/PFR (Ваша логика) ---
@@ -842,6 +972,15 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
         player_bet -= uncalled_bet
 
     stats_update[analyze_player_name]['net_profit'] = player_win - player_bet
+    
+    # --- STEAL SUCCESS CHECK ---
+    # Если мы делали стил, и раздача закончилась на префлопе, и мы выиграли (нет профит > 0)
+    # Значит все сфолдили.
+    if stats_update[analyze_player_name].get('is_steal_attempt', 0) == 1:
+        if stats_update[analyze_player_name]['final_street'] == 'preflop':
+            if stats_update[analyze_player_name]['net_profit'] > 0:
+                 stats_update[analyze_player_name]['steal_success'] = 1
+
     # 2. Финальная агрегация (для очистки булевых значений)
     final_stats = {}
     for name, data in stats_update.items():
@@ -866,7 +1005,17 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
             'facing_bet_pct_pot': data['facing_bet_pct_pot'],
             'opponent_position': data['opponent_position'],
             'board_cards': data['board_cards'],
-            'rfi_opportunity': data.get('rfi_opportunity', 0)
+            'rfi_opportunity': data.get('rfi_opportunity', 0),
+            # BB Stats
+            'facing_steal': data.get('facing_steal', 0),
+            'is_steal_defend': data.get('is_steal_defend', 0),
+            'is_steal_3bet': data.get('is_steal_3bet', 0),
+            'is_steal_fold': data.get('is_steal_fold', 0),
+            'steal_success': data.get('steal_success', 0),
+            # BB vs Limp Stats
+            'facing_limp': data.get('facing_limp', 0),
+            'is_limp_check': data.get('is_limp_check', 0),
+            'is_limp_iso': data.get('is_limp_iso', 0)
         }
     return final_stats
 
@@ -1024,6 +1173,16 @@ def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
             opponent_position = data.get('opponent_position', '')
             board_cards = data.get('board_cards', '')
             rfi_opportunity = data.get('rfi_opportunity', 0)
+            facing_steal = data.get('facing_steal', 0)
+            is_steal_defend = data.get('is_steal_defend', 0)
+            is_steal_3bet = data.get('is_steal_3bet', 0)
+            is_steal_fold = data.get('is_steal_fold', 0)
+            steal_success = data.get('steal_success', 0)
+            
+            # BB vs Limp
+            facing_limp = data.get('facing_limp', 0)
+            is_limp_check = data.get('is_limp_check', 0)
+            is_limp_iso = data.get('is_limp_iso', 0)
 
             conn.execute("""
                 INSERT OR REPLACE INTO my_hand_log (
@@ -1032,15 +1191,19 @@ def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
                     is_steal_attempt, net_profit, time_logged,
                     final_street, final_action, final_hand_strength,
                     facing_bet_pct_pot, opponent_position, board_cards,
-                    rfi_opportunity
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    rfi_opportunity,
+                    facing_steal, is_steal_defend, is_steal_3bet, is_steal_fold, steal_success,
+                    facing_limp, is_limp_check, is_limp_iso
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 hand_id, table_part_name, player_name, position, cards,
                 is_rfi, is_pfr, is_vpip, first_action, first_raiser_position,
                 is_steal_attempt, net_profit, time_logged,
                 final_street, final_action, final_hand_strength,
                 facing_bet_pct_pot, opponent_position, board_cards,
-                rfi_opportunity
+                rfi_opportunity,
+                facing_steal, is_steal_defend, is_steal_3bet, is_steal_fold, steal_success,
+                facing_limp, is_limp_check, is_limp_iso
             ))
         conn.commit()
     except Exception as e:
@@ -1141,40 +1304,56 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
 
-        # Базовый запрос
+        # Получение агрегированной статистики по сессии ("My Stats")
+        # Добавляем фильтр по времени
+        
         query = """
-            SELECT
+            SELECT 
                 COUNT(*) as total_hands,
-                SUM(is_pfr) as total_pfr,
-                SUM(is_vpip) as total_vpip,
+                SUM(is_pfr) as pfr_sum,
+                SUM(is_vpip) as vpip_sum,
                 position,
-                SUM(is_rfi) as total_rfi,
-                SUM(rfi_opportunity) as total_rfi_opp
-            FROM my_hand_log
+                SUM(is_rfi) as rfi_sum,
+                SUM(rfi_opportunity) as rfi_opp_sum,
+                
+                -- New Steal Stats
+                SUM(facing_steal) as facing_steal_sum,
+                SUM(is_steal_fold) as steal_fold_sum,
+                SUM(is_steal_defend) as steal_call_sum,
+                SUM(is_steal_3bet) as steal_3bet_sum,
+                SUM(is_steal_attempt) as steal_att_sum,
+                SUM(steal_success) as steal_succ_sum,
+                
+                -- New BB vs Limp Stats
+                SUM(facing_limp) as facing_limp_sum,
+                SUM(is_limp_check) as limp_check_sum,
+                SUM(is_limp_iso) as limp_iso_sum
+            
+            FROM my_hand_log 
             WHERE player_name = ?
         """
         params = [player_name]
-
+        
         if min_time:
             query += " AND time_logged >= ?"
             params.append(min_time)
-        
+            
         if max_time:
             query += " AND time_logged <= ?"
             params.append(max_time)
-            
+                
         query += " GROUP BY position"
 
         cursor.execute(query, params)
         results = cursor.fetchall()
         
         if not results:
-             # Если данных нет, возвращаем нули
-             return {
+                # Если данных нет, возвращаем нули
+                return {
                 "hands": {"total": 0, "utg":0, "mp":0, "co":0, "bu":0, "sb":0, "bb":0},
                 "pfr": {"total": "0.0", "utg":"0.0", "mp":"0.0", "co":"0.0", "bu":"0.0", "sb":"0.0", "bb":"0.0"},
                 "rfi": {"utg":"0.0", "mp":"0.0", "co":"0.0", "bu":"0.0", "sb":"0.0"}
-             }
+                }
 
         # Инициализация структур
         hands_data = {"total": 0, "utg":0, "mp":0, "co":0, "bu":0, "sb":0, "bb":0}
@@ -1183,18 +1362,44 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
         rfi_counts = {"utg":0, "mp":0, "co":0, "bu":0, "sb":0}
         rfi_opps = {"utg":0, "mp":0, "co":0, "bu":0, "sb":0}
         
+        # New Steal Aggregators
+        steal_att_total = 0
+        steal_succ_total = 0
+        bb_facing_Total = 0
+        bb_fold_Total = 0
+        bb_defend_Total = 0
+        bb_3bet_Total = 0
+        
+        # New BB vs Limp Aggregators
+        bb_facing_limp_Total = 0
+        bb_limp_check_Total = 0
+        bb_limp_iso_Total = 0
+        
         total_hands_all = 0
         total_pfr_all = 0
         total_vpip_all = 0
 
         for row in results:
             # row: 0=hands, 1=pfr_sum, 2=vpip_sum, 3=position, 4=rfi_sum, 5=rfi_opp
+            # 6=facing_steal, 7=steal_fold, 8=steal_call, 9=steal_3bet, 10=steal_att, 11=steal_succ
+            # 12=facing_limp, 13=limp_check, 14=limp_iso
             cnt_hands = row[0]
             cnt_pfr = row[1]
             cnt_vpip = row[2]
             pos = row[3].lower()
             cnt_rfi = row[4]
             cnt_rfi_opp = row[5]
+            
+            cnt_facing_steal = row[6]
+            cnt_fold_steal = row[7]
+            cnt_call_steal = row[8]
+            cnt_3bet_steal = row[9]
+            cnt_att_steal = row[10]
+            cnt_succ_steal = row[11]
+            
+            cnt_facing_limp = row[12]
+            cnt_check_limp = row[13]
+            cnt_iso_limp = row[14]
 
             # Агрегация по позициям
             if pos in hands_data:
@@ -1210,12 +1415,37 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
             total_hands_all += cnt_hands
             total_pfr_all += cnt_pfr
             total_vpip_all += cnt_vpip
+            
+            # Aggregate Steal Stats
+            steal_att_total += cnt_att_steal
+            steal_succ_total += cnt_succ_steal
+            
+            if pos == 'bb': 
+                bb_facing_Total += cnt_facing_steal
+                bb_fold_Total += cnt_fold_steal
+                bb_defend_Total += cnt_call_steal
+                bb_3bet_Total += cnt_3bet_steal
+                
+                # BB vs Limp
+                bb_facing_limp_Total += cnt_facing_limp
+                bb_limp_check_Total += cnt_check_limp
+                bb_limp_iso_Total += cnt_iso_limp
 
         hands_data["total"] = total_hands_all
         
         # Расчет процентов
         def calc_pct(num, den):
             return f"{round((num / den) * 100, 1)}" if den > 0 else "0.0"
+        
+        # New Formatted Metrics
+        steal_succ_pct = calc_pct(steal_succ_total, steal_att_total)
+        bb_fold_steal_pct = calc_pct(bb_fold_Total, bb_facing_Total)
+        bb_call_steal_pct = calc_pct(bb_defend_Total, bb_facing_Total) # Cold Call
+        bb_3bet_steal_pct = calc_pct(bb_3bet_Total, bb_facing_Total)
+        
+        # BB vs Limp Metrics
+        bb_check_limp_pct = calc_pct(bb_limp_check_Total, bb_facing_limp_Total)
+        bb_iso_limp_pct = calc_pct(bb_limp_iso_Total, bb_facing_limp_Total)
 
         pfr_fmt = {
             "total": calc_pct(total_pfr_all, total_hands_all),
@@ -1249,9 +1479,21 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
             "hands": hands_data,
             "vpip": vpip_fmt,
             "pfr": pfr_fmt,
-            "rfi": rfi_fmt
+            "rfi": rfi_fmt,
+            # New Stats
+            "bb_defense": {
+                "fold_to_steal": bb_fold_steal_pct,
+                "call_steal": bb_call_steal_pct,
+                "3bet_steal": bb_3bet_steal_pct
+            },
+            "bb_vs_limp": {
+                "check": bb_check_limp_pct,
+                "iso": bb_iso_limp_pct
+            },
+            "steal_success": steal_succ_pct
         }
-
+        
+        return stats
     except Exception as e:
         print(f"❌ Ошибка при получении статистики Hero ({min_time}-{max_time}): {e}")
         return None

@@ -1,9 +1,9 @@
 from typing import Dict, Any, Optional
 from PySide6.QtWidgets import (
-    QWidget, QLabel, QTableWidget, QTableWidgetItem, QGridLayout, 
-    QHeaderView, QDateEdit, QPushButton, QHBoxLayout, QCheckBox, QVBoxLayout
+    QWidget, QVBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
+    QHeaderView, QDateEdit, QPushButton, QHBoxLayout, QCheckBox, QFrame
 )
-from PySide6.QtCore import Qt, QPoint, QDate, QTime, QTimer
+from PySide6.QtCore import Qt, QTimer, QDate, QPoint
 from PySide6.QtGui import QMouseEvent
 from datetime import datetime, time
 from poker_stats_db import get_player_extended_stats
@@ -109,6 +109,39 @@ class PersonalStatsWindow(QWidget):
 
         self.main_layout.addWidget(self.stats_table)
 
+        # --- Blind Defense & Steal Stats Section ---
+        # A separate container for new stats
+        defense_group = QFrame()
+        defense_layout = QHBoxLayout(defense_group)
+        defense_layout.setContentsMargins(0, 5, 0, 0)
+        
+        # Helper to create styled labels
+        def create_stat_label(text):
+            lbl = QLabel(text)
+            lbl.setStyleSheet("color: #ccc; font-size: 12px;")
+            return lbl
+
+        self.lbl_steal_succ = create_stat_label("Steal Success: -")
+        self.lbl_bb_fold = create_stat_label("BB Fold to Steal: -")
+        self.lbl_bb_call = create_stat_label("BB Call vs Steal: -")
+        self.lbl_bb_3bet = create_stat_label("BB 3Bet vs Steal: -")
+        
+        defense_layout.addWidget(self.lbl_steal_succ)
+        defense_layout.addStretch()
+        defense_layout.addWidget(self.lbl_bb_fold)
+        defense_layout.addWidget(self.lbl_bb_call)
+        defense_layout.addWidget(self.lbl_bb_3bet)
+        
+        # --- Limp Stats (New Row/Section) ---
+        # Adding to same layout might be crowded. Let's add a separator or spacing.
+        defense_layout.addSpacing(20)
+        self.lbl_bb_check_limp = create_stat_label("BB Check vs Limp: -")
+        self.lbl_bb_iso_limp = create_stat_label("BB Iso vs Limp: -")
+        defense_layout.addWidget(self.lbl_bb_check_limp)
+        defense_layout.addWidget(self.lbl_bb_iso_limp)
+        
+        self.main_layout.addWidget(defense_group)
+
         # Начальная загрузка
         self.show()
         # Даем интерфейсу время на отрисовку перед обновлением данных
@@ -177,6 +210,23 @@ class PersonalStatsWindow(QWidget):
              # RFI start from col 1 (UTG)
              set_cell(3, i+1, rfi_data.get(pos, "0.0"))
 
+        # --- Update Blind Defense Stats ---
+        steal_succ = stats.get('steal_success', '-')
+        bb_def = stats.get('bb_defense', {})
+              # BB Defense Stats
+        bb_def = stats.get('bb_defense', {})
+        self.lbl_bb_fold.setText(f"BB Fold to Steal: {bb_def.get('fold_to_steal', '-')}%")
+        self.lbl_bb_call.setText(f"BB Call vs Steal: {bb_def.get('call_steal', '-')}%")
+        self.lbl_bb_3bet.setText(f"BB 3Bet vs Steal: {bb_def.get('3bet_steal', '-')}%")
+        
+        # Steal Success
+        steal_succ = stats.get('steal_success', '-')
+        self.lbl_steal_succ.setText(f"Steal Success: {steal_succ}%")
+        
+        # BB vs Limp Stats
+        bb_limp = stats.get('bb_vs_limp', {})
+        self.lbl_bb_check_limp.setText(f"BB Check vs Limp: {bb_limp.get('check', '-')}%")
+        self.lbl_bb_iso_limp.setText(f"BB Iso vs Limp: {bb_limp.get('iso', '-')}%")
         self.stats_table.viewport().update()
         self.adjust_window_size()
 
