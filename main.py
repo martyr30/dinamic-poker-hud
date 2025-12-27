@@ -125,6 +125,9 @@ class HUDWindow(QWidget):
             print(f"HUD: Ошибка получения списка окон: {e}")
             return False
 
+
+        candidates = []
+
         for win in windows:
             if target_part.lower() in win.title.lower():
                 try:
