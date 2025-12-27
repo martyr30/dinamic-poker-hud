@@ -153,8 +153,9 @@ class HUDWindow(QWidget):
             # Выводим отладку только если мы искали конкретный стол и не нашли
             if self.active_table_name:
                 print(f"HUD DEBUG: Не найдено окно для '{self.active_table_name}'. Видимые окна:")
-                for w_info in debug_window_list:
-                    print(f"  - {w_info}")
+                for w in windows:
+                     if w.title:
+                        print(f"  - '{w.title}' | Owner: {w.ownerName}")
                 print("----------------------------------------------------------------")
             self.target_window = None
             return False

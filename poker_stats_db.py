@@ -9,6 +9,7 @@ from decimal import Decimal
 from pokerkit import HandHistory
 # Добавляем импорт для генерации имени таблицы
 from poker_globals import DB_NAME, ACTION_POSITIONS, ALL_STATS_FIELDS, get_table_name_segment
+from pokerkit.utilities import Card, Rank
 
 # --- КОНСТАНТЫ ---
 DB_NAME = 'poker_stats.db'
@@ -98,10 +99,32 @@ def setup_database_table(table_segment: str):
                 is_steal_attempt BOOLEAN NOT NULL,
                 net_profit DECIMAL(10,2),
                 time_logged DATETIME DEFAULT CURRENT_TIMESTAMP,
+                
+                final_street TEXT,
+                final_action TEXT,
+                final_hand_strength TEXT,
+                facing_bet_pct_pot DECIMAL(5,2),
+                opponent_position TEXT,
+                board_cards TEXT,
 
                 PRIMARY KEY (hand_id, player_name)
             );
         """)
+        
+        # МИГРАЦИЯ my_hand_log
+        log_columns_to_add = [
+            "final_street", "final_action", "final_hand_strength",
+            "facing_bet_pct_pot", "opponent_position", "board_cards"
+        ]
+        for col in log_columns_to_add:
+            try:
+                # Определяем тип данных для колонки
+                col_type = "TEXT"
+                if "pct_pot" in col: col_type = "DECIMAL(5,2)"
+                
+                cursor.execute(f"ALTER TABLE my_hand_log ADD COLUMN {col} {col_type}")
+            except sqlite3.OperationalError:
+                pass
         conn.commit()
     except Exception as e:
         print(f"❌ Ошибка при настройке таблицы '{table_segment}': {e}")
@@ -112,6 +135,82 @@ def setup_database_table(table_segment: str):
 def setup_database():
     """Инициализация базы данных (не создает таблицы, так как они динамические)."""
     pass
+
+    return None
+
+def get_hand_strength(hole_cards_str: str, board_cards_str: str) -> str:
+    """
+    Определяет силу руки (Top Pair, 2nd Pair, etc.)
+    Args:
+        hole_cards_str: строка карт героя (напр. "AsKd")
+        board_cards_str: строка карт борда (напр. "Ah7s2d")
+    """
+    if not hole_cards_str:
+        return ""
+    
+    try:
+        hole = list(Card.parse(hole_cards_str))
+        board = list(Card.parse(board_cards_str)) if board_cards_str else []
+    except ValueError:
+        return ""
+        return ""
+
+    if not board:
+        # Preflop logic
+        if hole[0].rank == hole[1].rank:
+            return "Pocket Pair"
+        return "High Card"
+
+    # Postflop logic
+    # Оценка комбинации
+    # 1. Проверяем на совпадения (Пары)
+    
+    hole_ranks = [c.rank for c in hole]
+    board_ranks = [c.rank for c in board]
+    board_ranks.sort(reverse=True) # От старшей к младшей
+    
+    # Совпадения карт
+    matches = []
+    for hr in hole_ranks:
+        if hr in board_ranks:
+            matches.append(hr)
+            
+    is_pocket_pair = hole[0].rank == hole[1].rank
+    
+    # --- Стриты, Флеши, Сеты, Доперы (Упрощенно без полного эвалуатора) ---
+    # Для целей лик-файндера нам важны Top Pair, 2nd Pair, Weak Pair.
+    # Если у нас Сет или лучше - это обычно "Strong Hand".
+    
+    # Проверка на карманную пару
+    if is_pocket_pair:
+        if board_ranks and hole[0].rank > board_ranks[0]:
+            return "Overpair"
+        if hole[0].rank in board_ranks:
+            return "Set" # Или Full House/Quads, но Set достаточно для 'Strong'
+        # Если карманка ниже старшей карты борда
+        # Нужно понять, какая это пара относительно борда.
+        # Например, Board: K 7 2. Hero: 99. Это "Underpair" к K, но лучше 7.
+        # Обычно это называется Middle Pair или Weak Pair в зависимости от контекста.
+        return "Pocket Pair < Top Card"
+
+    if not matches:
+        return "High Card" # Или дро
+        
+    # У нас есть совпадение(я)
+    if len(matches) >= 2:
+        return "Two Pair" # Или Trips
+        
+    # Одно совпадение (One Pair)
+    match_rank = matches[0]
+    
+    if match_rank == board_ranks[0]:
+        return "Top Pair"
+    elif len(board_ranks) > 1 and match_rank == board_ranks[1]:
+        return "2nd Pair"
+    else:
+        return "Weak Pair"
+
+    return "Pair"
 
 def determine_position(player_index_p: int, num_players_in_hand: int) -> Optional[str]:
     """
@@ -387,7 +486,14 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
     all_players = [p for p in hand_history.players]
     analyze_player_code = ""
     player_bet = Decimal('0.00')
+    player_bet = Decimal('0.00')
     player_win = Decimal('0.00')
+    
+    # Ensure list conversion for subscriptable access
+    hh_winnings = list(hand_history.winnings) if hand_history.winnings else []
+    hh_blinds = list(hand_history.blinds_or_straddles) if hand_history.blinds_or_straddles else []
+    hh_stacks = list(hand_history.starting_stacks) if hand_history.starting_stacks else []
+    
     # Инициализация всех игроков
     for i, player_name in enumerate(all_players):
         player_code = f'p{i + 1}'
@@ -410,17 +516,42 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
                 'is_steal_attempt': 0,
                 # 'actions': [],
                 'net_profit': 0.00,
-                'time_logged': datetime.date(year=hand_history.year, month=hand_history.month, day=hand_history.day)
+                'net_profit': 0.00,
+                'time_logged': datetime.datetime.now(), # Placeholder
+                'final_street': 'preflop',
+                'final_action': 'n/a',
+                'final_hand_strength': '',
+                'facing_bet_pct_pot': 0.0,
+                'opponent_position': '',
+                'board_cards': ''
             }
+
+            # 1. ВРЕМЯ РАЗДАЧИ
+            # Извлекаем дату и время из HandHistory
+            # PokerKit обычно парсит дату в .date (datetime.date) и иногда время.
+            # Если hand_history имеет time, используем его.
+            try:
+                hh_date = hand_history.date 
+                # Если time доступно (зависит от версии/парсера)
+                hh_time = getattr(hand_history, 'time', None)
+                
+                if isinstance(hh_date, datetime.date):
+                    if hh_time:
+                         stats_update[player_name]['time_logged'] = datetime.datetime.combine(hh_date, hh_time)
+                    else:
+                         stats_update[player_name]['time_logged'] = datetime.datetime(hh_date.year, hh_date.month, hh_date.day)
+            except Exception:
+                pass
+
             
             # --- ОТЛАДОЧНЫЙ БЛОК ДЛЯ ПОИСКА ОШИБКИ ---
             try:
                 # ВАЖНО: Проверяем, что список блайндов существует, прежде чем обращаться к нему
-                # if hand_history.blinds_or_straddles and hand_history.blinds_or_straddles[i] != 0:
-                #     player_bet = hand_history.blinds_or_straddles[i]
+                # if hh_blinds and hh_blinds[i] != 0:
+                #     player_bet = hh_blinds[i]
                 # Аналогичная проверка для выигрышей
-                if hand_history.winnings and i < len(hand_history.winnings) and hand_history.winnings[i] != 0:
-                    player_win = hand_history.winnings[i]
+                if hh_winnings and i < len(hh_winnings) and hh_winnings[i] != 0:
+                    player_win = hh_winnings[i]
             except IndexError:
                 # Перевызываем ошибку, чтобы увидеть полный traceback
                 raise
@@ -474,19 +605,28 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
     # Мы должны отслеживать ставки на каждой улице (префлоп, флоп, терн, ривер),
     # чтобы правильно вычислять размеры коллов и общие инвестиции.
     total_investment = {p_code: Decimal('0.00') for p_code in player_map.keys()}
+    total_investment = {p_code: Decimal('0.00') for p_code in player_map.keys()}
     bets_this_street = {p_code: Decimal('0.00') for p_code in player_map.keys()}
-    remaining_stacks = {f'p{i+1}': stack for i, stack in enumerate(hand_history.starting_stacks)}
+    
+    current_street = 'preflop' # Инициализация улицы
+    
+    remaining_stacks = {f'p{i+1}': stack for i, stack in enumerate(hh_stacks)}
     current_street_bet = Decimal('0.00')
     last_bet_by_player = {'player': None, 'amount': Decimal('0.00')}
     last_action_was_fold = False
+    
+    # Для трекинга финального состояния
+    current_board_cards = ""
+    last_aggressor_pos = "" # Позиция того, кто сделал Bet/Raise последним
+    pot_before_street = Decimal('0.00') # Размер банка до начала улицы
     
     decimal.getcontext().prec = 10 # Увеличиваем точность для Decimal
 
     # Инициализируем ставки блайндами
     for i, p_name in enumerate(all_players):
         p_code = f'p{i+1}'
-        if hand_history.blinds_or_straddles and i < len(hand_history.blinds_or_straddles):
-            blind_amount = hand_history.blinds_or_straddles[i]
+        if hh_blinds and i < len(hh_blinds):
+            blind_amount = hh_blinds[i]
             if blind_amount > 0:
                 investment = min(blind_amount, remaining_stacks.get(p_code, Decimal('0.00')))
                 total_investment[p_code] += investment
@@ -500,10 +640,26 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
         parts = action_str.split()
 
         # Сброс ставок при переходе на новую улицу (флоп, терн, ривер)
+        # Сброс ставок при переходе на новую улицу (флоп, терн, ривер)
         if parts[0] == 'd' and parts[1] == 'db':
+            # Добавляем ставки в банк
+            street_pot = sum(bets_this_street.values())
+            pot_before_street += street_pot
+
             bets_this_street = {p_code: Decimal('0.00') for p_code in player_map.keys()}
             current_street_bet = Decimal('0.00')
             last_bet_by_player = {'player': None, 'amount': Decimal('0.00')}
+            last_aggressor_pos = "" # Сброс агрессора на новой улице
+
+            # Обновляем карты борда
+            new_board_cards = parts[2]
+            current_board_cards += new_board_cards
+            
+            # Обновляем улицу для анализа
+            if current_street == 'preflop': current_street = 'flop'
+            elif current_street == 'flop': current_street = 'turn'
+            elif current_street == 'turn': current_street = 'river'
+            
             continue
 
         if action_str.startswith('p'):
@@ -522,6 +678,7 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
                 bets_this_street[player_code] = raise_to_amount
                 current_street_bet = raise_to_amount
                 last_bet_by_player = {'player': player_code, 'amount': additional_investment}
+                last_aggressor_pos = player_map.get(player_code)[1] # Сохраняем позицию агрессора
 
             elif action_type_code == 'cc': # Call
                 last_bet_by_player = {'player': None, 'amount': Decimal('0.00')}
@@ -549,6 +706,35 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
             elif action_type_code == 'f': # Fold
                 last_action_was_fold = True
 
+            # --- ЗАПИСЬ ИНФОРМАЦИИ ПРИ ДЕЙСТВИИ ХИРО ---
+            if player_code == analyze_player_code:
+                # Мы обновляем финальный статус КАЖДЫЙ раз, когда хиро делает действие.
+                # Последнее сохраненное действие и будет финальным (если это фолд или конец раздачи).
+                
+                # Вычисляем Pot Odds / Facing Bet %
+                current_pot = pot_before_street + sum(bets_this_street.values())
+                
+                facing_pct = 0.0
+                if current_street_bet > 0 and action_type_code in ('cc', 'f'):
+                    # Сколько нам нужно доставить?
+                    my_invested = bets_this_street.get(analyze_player_code, Decimal('0.00'))
+                    to_call = current_street_bet - my_invested
+                    
+                    if current_pot > 0:
+                        facing_pct = float(to_call / current_pot) * 100
+
+                stats_update[analyze_player_name]['final_street'] = current_street
+                stats_update[analyze_player_name]['final_action'] = 'Fold' if action_type_code == 'f' else ('Call' if action_type_code == 'cc' else 'Raise')
+                stats_update[analyze_player_name]['facing_bet_pct_pot'] = facing_pct
+                stats_update[analyze_player_name]['opponent_position'] = last_aggressor_pos
+                stats_update[analyze_player_name]['board_cards'] = current_board_cards
+                
+                # Hand Strength
+                my_cards = stats_update[analyze_player_name]['cards']
+                strength = get_hand_strength(my_cards, current_board_cards)
+                stats_update[analyze_player_name]['final_hand_strength'] = strength
+
+
     player_bet = total_investment.get(analyze_player_code, Decimal('0.00'))
 
     # Если последнее действие в истории было фолдом, значит, предыдущая ставка не была принята.
@@ -574,7 +760,13 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
             'first_raiser_position': data['first_raiser_position'],
             'is_steal_attempt': data['is_steal_attempt'],
             'net_profit': data['net_profit'],
-            'time_logged': data['time_logged']
+            'time_logged': data['time_logged'],
+            'final_street': data['final_street'],
+            'final_action': data['final_action'],
+            'final_hand_strength': data['final_hand_strength'],
+            'facing_bet_pct_pot': data['facing_bet_pct_pot'],
+            'opponent_position': data['opponent_position'],
+            'board_cards': data['board_cards']
         }
     return final_stats
 
@@ -722,18 +914,30 @@ def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
             first_raiser_position = data.get('first_raiser_position', "")
             is_steal_attempt = data.get('is_steal_attempt', "")
             net_profit = float(data.get('net_profit', 0.00))
-            time_logged = data.get('time_logged', "1990-01-01")
+            net_profit = float(data.get('net_profit', 0.00))
+            time_logged = data.get('time_logged')
+            
+            final_street = data.get('final_street', '')
+            final_action = data.get('final_action', '')
+            final_hand_strength = data.get('final_hand_strength', '')
+            facing_bet_pct_pot = data.get('facing_bet_pct_pot', 0.0)
+            opponent_position = data.get('opponent_position', '')
+            board_cards = data.get('board_cards', '')
 
             conn.execute("""
                 INSERT OR REPLACE INTO my_hand_log (
                     hand_id, table_part_name, player_name, position, cards,
                     is_rfi, is_pfr, is_vpip, first_action, first_raiser_position,
-                    is_steal_attempt, net_profit
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    is_steal_attempt, net_profit, time_logged,
+                    final_street, final_action, final_hand_strength,
+                    facing_bet_pct_pot, opponent_position, board_cards
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 hand_id, table_part_name, player_name, position, cards,
                 is_rfi, is_pfr, is_vpip, first_action, first_raiser_position,
-                is_steal_attempt, net_profit
+                is_steal_attempt, net_profit, time_logged,
+                final_street, final_action, final_hand_strength,
+                facing_bet_pct_pot, opponent_position, board_cards
             ))
         conn.commit()
     except Exception as e:
