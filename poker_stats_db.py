@@ -14,6 +14,34 @@ from pokerkit.utilities import Card, Rank
 # --- КОНСТАНТЫ ---
 DB_NAME = 'poker_stats.db'
 
+def normalize_cards(cards_str: str) -> str:
+    """Нормализует строку карт (AsKc -> AKo, 9h9s -> 99, QsJs -> QJss -> QJs)."""
+    if not cards_str or len(cards_str) != 4:
+        return ""
+    
+    # Ranks order
+    ranks = "23456789TJQKA"
+    
+    r1, s1 = cards_str[0], cards_str[1]
+    r2, s2 = cards_str[2], cards_str[3]
+    
+    # Sort by rank index (Higher first)
+    i1 = ranks.find(r1)
+    i2 = ranks.find(r2)
+    
+    if i1 == -1 or i2 == -1: return "" # Invalid
+    
+    if i1 < i2:
+        r1, r2 = r2, r1
+        s1, s2 = s2, s1
+    
+    if r1 == r2:
+        return f"{r1}{r2}"
+    elif s1 == s2:
+        return f"{r1}{r2}s"
+    else:
+        return f"{r1}{r2}o"
+
 # --- 1. ФУНКЦИИ НАСТРОЙКИ БАЗЫ ДАННЫХ ---
 
 def setup_database_table(table_segment: str):
@@ -114,6 +142,13 @@ def setup_database_table(table_segment: str):
                 is_steal_3bet INTEGER DEFAULT 0,   -- 1, если сделал 3-бет
                 is_steal_fold INTEGER DEFAULT 0,   -- 1, если сфолдил
                 steal_success INTEGER DEFAULT 0,    -- 1, если наш стил удался (все сфолдили)
+                
+                normalized_hand TEXT,               -- Normalized hand (e.g., AKs, 99, T8o)
+                
+                -- New BB vs Limp Stats columns
+                facing_limp INTEGER DEFAULT 0,
+                is_limp_check INTEGER DEFAULT 0,
+                is_limp_iso INTEGER DEFAULT 0,
 
                 PRIMARY KEY (hand_id, player_name)
             );
@@ -123,7 +158,9 @@ def setup_database_table(table_segment: str):
         log_columns_to_add = [
             "final_street", "final_action", "final_hand_strength",
             "facing_bet_pct_pot", "opponent_position", "board_cards",
-            "rfi_opportunity"
+            "final_street", "final_action", "final_hand_strength",
+            "facing_bet_pct_pot", "opponent_position", "board_cards",
+            "rfi_opportunity", "normalized_hand", "facing_limp", "is_limp_check", "is_limp_iso"
         ]
         for col in log_columns_to_add:
             try:
@@ -1183,6 +1220,9 @@ def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
             facing_limp = data.get('facing_limp', 0)
             is_limp_check = data.get('is_limp_check', 0)
             is_limp_iso = data.get('is_limp_iso', 0)
+            
+            # Normalize Hand for Chart
+            normalized_hand = normalize_cards(cards)
 
             conn.execute("""
                 INSERT OR REPLACE INTO my_hand_log (
@@ -1193,8 +1233,8 @@ def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
                     facing_bet_pct_pot, opponent_position, board_cards,
                     rfi_opportunity,
                     facing_steal, is_steal_defend, is_steal_3bet, is_steal_fold, steal_success,
-                    facing_limp, is_limp_check, is_limp_iso
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    facing_limp, is_limp_check, is_limp_iso, normalized_hand
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 hand_id, table_part_name, player_name, position, cards,
                 is_rfi, is_pfr, is_vpip, first_action, first_raiser_position,
@@ -1203,7 +1243,7 @@ def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
                 facing_bet_pct_pot, opponent_position, board_cards,
                 rfi_opportunity,
                 facing_steal, is_steal_defend, is_steal_3bet, is_steal_fold, steal_success,
-                facing_limp, is_limp_check, is_limp_iso
+                facing_limp, is_limp_check, is_limp_iso, normalized_hand
             ))
         conn.commit()
     except Exception as e:
@@ -1502,3 +1542,52 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
             conn.close()
 
     return stats
+
+def get_chart_hands_data(player_name: str, stat_type: str, position: str, min_time: Optional[datetime.datetime] = None, max_time: Optional[datetime.datetime] = None) -> Dict[str, int]:
+    """
+    Returns data for Hand Matrix Chart.
+    stat_type: 'vpip', 'pfr', 'rfi'
+    position: 'utg', 'mp', 'co', 'bu', 'sb', 'bb', 'total'
+    """
+    data = {}
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        cursor = conn.cursor()
+        
+        col_map = {
+            'vpip': 'is_vpip',
+            'pfr': 'is_pfr',
+            'rfi': 'is_rfi'
+        }
+        target_col = col_map.get(stat_type.lower())
+        if not target_col:
+             # Fallback or error?
+             return {}
+             
+        query = f"SELECT normalized_hand, COUNT(*) FROM my_hand_log WHERE player_name = ? AND {target_col} = 1"
+        params = [player_name]
+        
+        if position and position.lower() != 'total':
+            query += " AND position = ?"
+            params.append(position.lower())
+            
+        if min_time:
+            query += " AND time_logged >= ?"
+            params.append(min_time)
+        if max_time:
+            query += " AND time_logged <= ?"
+            params.append(max_time)
+            
+        query += " GROUP BY normalized_hand"
+        
+        cursor.execute(query, params)
+        for hand, count in cursor.fetchall():
+            if hand:
+                data[hand] = count
+                
+    except Exception as e:
+        print(f"Chart Query Error: {e}")
+    finally:
+        if conn: conn.close()
+        
+    return data

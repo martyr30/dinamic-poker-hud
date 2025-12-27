@@ -6,7 +6,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer, QDate, QPoint
 from PySide6.QtGui import QMouseEvent
 from datetime import datetime, time
-from poker_stats_db import get_player_extended_stats
+from poker_stats_db import get_player_extended_stats, get_chart_hands_data
+from hand_matrix_widget import HandChartDialog
 
 class PersonalStatsWindow(QWidget):
     """
@@ -33,10 +34,38 @@ class PersonalStatsWindow(QWidget):
         self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(10, 10, 10, 10)
 
-        # 1. ЗАГОЛОВОК
-        self.title_label = QLabel(f"📊 {target_player_name} (Extended)")
+        # 1. ЗАГОЛОВОК И КНОПКИ
+        header_layout = QHBoxLayout()
+        header_layout.setContentsMargins(0, 0, 0, 0)
+        
+        self.title_label = QLabel(f"📊 {target_player_name}")
         self.title_label.setStyleSheet("color: #00BFFF; font-size: 16px; font-weight: bold;")
-        self.main_layout.addWidget(self.title_label)
+        header_layout.addWidget(self.title_label)
+        
+        header_layout.addStretch()
+        
+        # Кнопка Mini Mode
+        self.is_mini_mode = False
+        self.btn_mini = QPushButton("_")
+        self.btn_mini.setFixedSize(24, 24)
+        self.btn_mini.setStyleSheet("background-color: #444; color: white; border: none; font-weight: bold;")
+        self.btn_mini.clicked.connect(self.toggle_mode)
+        header_layout.addWidget(self.btn_mini)
+        
+        self.main_layout.addLayout(header_layout)
+        
+        # Лейбл для Mini Mode
+        self.mini_stats_label = QLabel()
+        self.mini_stats_label.setStyleSheet("color: #00FF00; font-size: 14px; font-weight: bold; padding: 5px;")
+        self.mini_stats_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.mini_stats_label.hide()
+        self.main_layout.addWidget(self.mini_stats_label)
+
+        # Контейнер для фильтров (чтобы скрывать)
+        self.filter_frame = QFrame()
+        self.main_layout.addWidget(self.filter_frame)
+        filter_box_layout = QVBoxLayout(self.filter_frame)
+        filter_box_layout.setContentsMargins(0, 0, 0, 0)
 
         # 2. ПАНЕЛЬ ФИЛЬТРОВ (ДАТА)
         filter_layout = QHBoxLayout()
@@ -72,7 +101,8 @@ class PersonalStatsWindow(QWidget):
         filter_layout.addWidget(self.btn_refresh)
         
         filter_layout.addStretch()
-        self.main_layout.addLayout(filter_layout)
+        # self.main_layout.addLayout(filter_layout) # Moved to filter_frame
+        filter_box_layout.addLayout(filter_layout)
 
 
         # 3. ТАБЛИЦА СТАТИСТИКИ
@@ -84,6 +114,7 @@ class PersonalStatsWindow(QWidget):
             "TOTAL", "UTG", "MP", "CO", "BU", "SB"
         ])
         self.stats_table.setVerticalHeaderLabels(["Hands", "VPIP %", "PFR %", "RFI %"])
+        self.stats_table.cellClicked.connect(self.on_table_cell_clicked)
 
         # Стилизация таблицы
         header_style = "QHeaderView::section { background-color: #333; color: white; font-weight: bold; }"
@@ -111,8 +142,8 @@ class PersonalStatsWindow(QWidget):
 
         # --- Blind Defense & Steal Stats Section ---
         # A separate container for new stats
-        defense_group = QFrame()
-        defense_layout = QHBoxLayout(defense_group)
+        self.defense_group = QFrame()
+        defense_layout = QHBoxLayout(self.defense_group)
         defense_layout.setContentsMargins(0, 5, 0, 0)
         
         # Helper to create styled labels
@@ -140,7 +171,7 @@ class PersonalStatsWindow(QWidget):
         defense_layout.addWidget(self.lbl_bb_check_limp)
         defense_layout.addWidget(self.lbl_bb_iso_limp)
         
-        self.main_layout.addWidget(defense_group)
+        self.main_layout.addWidget(self.defense_group)
 
         # Начальная загрузка
         self.show()
@@ -177,8 +208,39 @@ class PersonalStatsWindow(QWidget):
         except Exception as e:
             print(f"Ошибка обновления личной статистики: {e}")
 
+    def toggle_mode(self):
+        """Переключение между полным и мини-режимом."""
+        self.is_mini_mode = not self.is_mini_mode
+        
+        if self.is_mini_mode:
+            # Hide Full Mode Widgets
+            self.filter_frame.hide()
+            self.stats_table.hide()
+            self.defense_group.hide()
+            # Show Mini Label
+            self.mini_stats_label.show()
+            self.btn_mini.setText("□") # Icon for restore
+            
+            # Update content
+            if hasattr(self, 'current_stats') and self.current_stats:
+                hands = self.current_stats.get('hands', {}).get('total', 0)
+                vpip = self.current_stats.get('vpip', {}).get('total', '-')
+                pfr = self.current_stats.get('pfr', {}).get('total', '-')
+                self.mini_stats_label.setText(f"Hands: {hands} | VPIP: {vpip}% | PFR: {pfr}%")
+            
+            self.resize(250, 60) # Compact size
+        else:
+            # Restore Full Mode
+            self.filter_frame.show()
+            self.stats_table.show()
+            self.defense_group.show()
+            self.mini_stats_label.hide()
+            self.btn_mini.setText("_")
+            self.adjust_window_size()
+
     def update_stats_table(self, stats: Dict[str, Dict[str, Any]]):
         """Заполняет таблицу данными."""
+        self.current_stats = stats # Save for mini mode
         positions = ["total", "utg", "mp", "co", "bu", "sb"]
         
         hands_data = stats.get('hands', {})
@@ -201,7 +263,6 @@ class PersonalStatsWindow(QWidget):
             set_cell(2, col_idx, pfr_data.get(pos, "0.0"))
 
         # Row 3: RFI (нет Total для RFI обычно, но если есть - выведем)
-        # У нас positions = ["total", ...], а RFI обычно с UTG.
         # RFI data: utg, mp, co, bu, sb
         rfi_positions = ["utg", "mp", "co", "bu", "sb"]
         set_cell(3, 0, "-") # Total RFI often N/A or avg
@@ -261,3 +322,38 @@ class PersonalStatsWindow(QWidget):
         if event.button() == Qt.MouseButton.LeftButton:
              self.dragging = False
              event.accept()
+
+    def on_table_cell_clicked(self, row, col):
+        """Обработка клика по ячейке статистики для показа чарта."""
+        stat_types = ['hands', 'vpip', 'pfr', 'rfi']
+        positions = ['total', 'utg', 'mp', 'co', 'bu', 'sb']
+        
+        if row >= len(stat_types) or col >= len(positions):
+            return
+            
+        stat_type = stat_types[row]
+        position = positions[col]
+        
+        # Determine Date Range
+        qdate_from = self.date_from.date()
+        dt_from = datetime.combine(qdate_from.toPython(), time.min)
+        dt_to = None
+        if self.check_to.isChecked():
+             qdate_to = self.date_to.date()
+             dt_to = datetime.combine(qdate_to.toPython(), time.max)
+        
+        print(f"Fetching Chart: {stat_type} {position}")
+        data = get_chart_hands_data(
+            self.target_player, 
+            stat_type, 
+            position, 
+            min_time=dt_from, 
+            max_time=dt_to
+        )
+        
+        if not data:
+            print("No data for chart.")
+             # return
+            
+        dlg = HandChartDialog(f"Hands: {stat_type.upper()} @ {position.upper()}", data)
+        dlg.exec()
