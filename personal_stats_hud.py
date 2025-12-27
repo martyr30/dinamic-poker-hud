@@ -1,13 +1,18 @@
-# personal_stats_hud.py
-
 from typing import Dict, Any, Optional
-from PySide6.QtWidgets import QWidget, QLabel, QTableWidget, QTableWidgetItem, QGridLayout, QHeaderView
-from PySide6.QtCore import Qt, QPoint
+from PySide6.QtWidgets import (
+    QWidget, QVBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
+    QHeaderView, QDateEdit, QPushButton, QHBoxLayout, QCheckBox, QFrame
+)
+from PySide6.QtCore import Qt, QTimer, QDate, QPoint
 from PySide6.QtGui import QMouseEvent
-from poker_stats_db import get_player_extended_stats # Будет добавлен позже
+from datetime import datetime, time
+from poker_stats_db import get_player_extended_stats
 
 class PersonalStatsWindow(QWidget):
-    """Отдельное окно для отображения расширенной статистики текущего игрока (Martyr40)."""
+    """
+    Отдельное окно для отображения расширенной статистики текущего игрока (Hero).
+    Позволяет фильтровать статистику по дате.
+    """
 
     def __init__(self, target_player_name: str):
         super().__init__()
@@ -17,166 +22,242 @@ class PersonalStatsWindow(QWidget):
 
         self.dragging = False
         self.offset = QPoint()
-        # Настройка окна: всегда сверху, без рамки, прозрачный фон
+        # Настройка окна: всегда сверху, без рамки, темный фон
         self.setWindowFlags(
             Qt.WindowType.WindowStaysOnTopHint |
             Qt.WindowType.FramelessWindowHint
         )
+        self.setStyleSheet("background-color: rgb(50, 50, 50); border-radius: 8px; color: white;")
 
-        # self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
-        # self.setStyleSheet("background-color: rgba(0, 0, 0, 180); border-radius: 8px;")
-        self.setStyleSheet("background-color: rgb(50, 50, 50); border-radius: 8px;")
-
-        self.main_layout = QGridLayout(self)
+        # Основной лейаут
+        self.main_layout = QVBoxLayout(self)
         self.main_layout.setContentsMargins(10, 10, 10, 10)
 
-        # Заголовок
-        self.title_label = QLabel(f"📊 {target_player_name} (Расширенная)")
+        # 1. ЗАГОЛОВОК
+        self.title_label = QLabel(f"📊 {target_player_name} (Extended)")
         self.title_label.setStyleSheet("color: #00BFFF; font-size: 16px; font-weight: bold;")
-        self.main_layout.addWidget(self.title_label, 0, 0, 1, 2)
+        self.main_layout.addWidget(self.title_label)
 
-        # --- Создание таблицы ---
-        self.stats_table = QTableWidget(3, 6) # 2 строки (Рук/PFR %), 6 колонок (Общ, UTG, MP, CO, BU, SB)
+        # 2. ПАНЕЛЬ ФИЛЬТРОВ (ДАТА)
+        filter_layout = QHBoxLayout()
+        
+        # Дата С (From)
+        filter_layout.addWidget(QLabel("С:"))
+        self.date_from = QDateEdit()
+        self.date_from.setDisplayFormat("dd.MM.yyyy")
+        self.date_from.setCalendarPopup(True)
+        self.date_from.setDate(QDate.currentDate()) # По умолчанию - сегодня
+        self.date_from.setStyleSheet("background-color: #333; color: white; border: 1px solid #555;")
+        filter_layout.addWidget(self.date_from)
 
-        # ⚠️ ВАЖНО: Используем LaTeX для обозначения позиций UTG, MP, CO, BU, SB
+        # Дата ПО (To)
+        self.check_to = QCheckBox("По:")
+        self.check_to.setStyleSheet("color: white;")
+        self.check_to.stateChanged.connect(self._toggle_date_to)
+        filter_layout.addWidget(self.check_to)
+
+        self.date_to = QDateEdit()
+        self.date_to.setDisplayFormat("dd.MM.yyyy")
+        self.date_to.setCalendarPopup(True)
+        self.date_to.setDate(QDate.currentDate())
+        self.date_to.setEnabled(False) # По умолчанию отключено
+        self.date_to.setStyleSheet("background-color: #333; color: white; border: 1px solid #555;")
+        filter_layout.addWidget(self.date_to)
+
+        # Кнопка ОБНОВИТЬ
+        self.btn_refresh = QPushButton("⟳")
+        self.btn_refresh.setFixedWidth(30)
+        self.btn_refresh.setStyleSheet("background-color: #444; color: white; border: 1px solid #666;")
+        self.btn_refresh.clicked.connect(self.refresh_stats)
+        filter_layout.addWidget(self.btn_refresh)
+        
+        filter_layout.addStretch()
+        self.main_layout.addLayout(filter_layout)
+
+
+        # 3. ТАБЛИЦА СТАТИСТИКИ
+        # 4 строки: Рук, VPIP, PFR, RFI
+        # 6 колонок: Total, UTG, MP, CO, BU, SB
+        self.stats_table = QTableWidget(4, 6) 
+        
         self.stats_table.setHorizontalHeaderLabels([
             "TOTAL", "UTG", "MP", "CO", "BU", "SB"
         ])
+        self.stats_table.setVerticalHeaderLabels(["Hands", "VPIP %", "PFR %", "RFI %"])
 
-        self.stats_table.setVerticalHeaderLabels(["Рук", "PFR %", "RFI %"])
-
-        # Настройка внешнего вида таблицы
-        header_style = "QHeaderView::section { background-color: #333; color: white; }"
+        # Стилизация таблицы
+        header_style = "QHeaderView::section { background-color: #333; color: white; font-weight: bold; }"
         self.stats_table.horizontalHeader().setStyleSheet(header_style)
         self.stats_table.verticalHeader().setStyleSheet(header_style)
-        table_style = "QTableWidget { gridline-color: #555; background-color: transparent; color: white; border: none; }"
+        
+        table_style = """
+            QTableWidget { 
+                gridline-color: #555; 
+                background-color: transparent; 
+                color: white; 
+                border: none; 
+                font-size: 13px;
+            }
+        """
         self.stats_table.setStyleSheet(table_style)
-
         self.stats_table.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.stats_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        # 1. Горизонтальные заголовки (Столбцы: Общий, UTG, MP...)
-        # Stretch — чтобы равномерно распределить оставшееся пространство между колонками
+        
+        # Растягиваем колонки
         self.stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-
-        # 2. Вертикальные заголовки (Строки: Рук, PFR %)
-        # ResizeToContents — чтобы гарантировать, что названия строк ("Рук", "PFR %") поместятся
         self.stats_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
 
-        # 3. Принудительно подгоняем заголовки после установки данных/стилей
-        self.stats_table.resizeColumnsToContents() # Подгоняет ширину столбцов под текущие данные
-        self.stats_table.resizeRowsToContents()   # Подгоняет высоту строк под содержимое
+        self.main_layout.addWidget(self.stats_table)
 
-        self.main_layout.addWidget(self.stats_table, 1, 0, 1, 2)
+        # --- Blind Defense & Steal Stats Section ---
+        # A separate container for new stats
+        defense_group = QFrame()
+        defense_layout = QHBoxLayout(defense_group)
+        defense_layout.setContentsMargins(0, 5, 0, 0)
+        
+        # Helper to create styled labels
+        def create_stat_label(text):
+            lbl = QLabel(text)
+            lbl.setStyleSheet("color: #ccc; font-size: 12px;")
+            return lbl
 
+        self.lbl_steal_succ = create_stat_label("Steal Success: -")
+        self.lbl_bb_fold = create_stat_label("BB Fold to Steal: -")
+        self.lbl_bb_call = create_stat_label("BB Call vs Steal: -")
+        self.lbl_bb_3bet = create_stat_label("BB 3Bet vs Steal: -")
+        
+        defense_layout.addWidget(self.lbl_steal_succ)
+        defense_layout.addStretch()
+        defense_layout.addWidget(self.lbl_bb_fold)
+        defense_layout.addWidget(self.lbl_bb_call)
+        defense_layout.addWidget(self.lbl_bb_3bet)
+        
+        # --- Limp Stats (New Row/Section) ---
+        # Adding to same layout might be crowded. Let's add a separator or spacing.
+        defense_layout.addSpacing(20)
+        self.lbl_bb_check_limp = create_stat_label("BB Check vs Limp: -")
+        self.lbl_bb_iso_limp = create_stat_label("BB Iso vs Limp: -")
+        defense_layout.addWidget(self.lbl_bb_check_limp)
+        defense_layout.addWidget(self.lbl_bb_iso_limp)
+        
+        self.main_layout.addWidget(defense_group)
+
+        # Начальная загрузка
         self.show()
-        # 🌟 Важно: Снова подгоняем размер окна под новый контент
-        self.adjustSize()
+        # Даем интерфейсу время на отрисовку перед обновлением данных
+        QTimer.singleShot(100, self.refresh_stats)
 
-    def calculate_table_width(self) -> int:
-        """Рассчитывает общую необходимую ширину для всех столбцов и заголовков."""
+    def _toggle_date_to(self, state):
+        self.date_to.setEnabled(self.check_to.isChecked())
 
-        # 1. Ширина вертикального заголовка (строки 'Рук', 'PFR %')
-        v_header_width = self.stats_table.verticalHeader().sizeHint().width()
+    def refresh_stats(self):
+        """Загружает данные из БД с учетом выбранных дат."""
+        try:
+            # 1. Определяем диапазон времени
+            # Начало дня "С"
+            qdate_from = self.date_from.date()
+            dt_from = datetime.combine(qdate_from.toPython(), time.min)
 
-        # 2. Общая ширина горизонтальных столбцов (Общий PFR, UTG, MP, ...)
-        columns_width = 0
-        for i in range(self.stats_table.columnCount()):
-            # Берем ширину, которая была рассчитана с помощью resizeColumnsToContents
-            columns_width += self.stats_table.columnWidth(i)
+            # Конец дня "По" (если включено)
+            dt_to = None
+            if self.check_to.isChecked():
+                qdate_to = self.date_to.date()
+                dt_to = datetime.combine(qdate_to.toPython(), time.max)
+            
+            # 2. Запрос в БД
+            # Используем пустой table_segment, так как фильтруем по all my_hand_log
+            stats = get_player_extended_stats(self.target_player, "", min_time=dt_from, max_time=dt_to)
+            
+            if stats:
+                self.update_stats_table(stats)
+            else:
+                 # Если данных нет (например, пустой результат), можно очистить таблицу или оставить нули
+                 pass 
 
-        # 3. Дополнительные элементы:
-        # - Ширина рамки таблицы (table border)
-        # - Ширина скролл-бара (даже если он отключен, иногда учитывается)
-        # - Небольшой запас (padding)
-        padding = 20
+        except Exception as e:
+            print(f"Ошибка обновления личной статистики: {e}")
 
-        total_width = v_header_width + columns_width + padding
-
-        return total_width
-
-    def calculate_table_height(self) -> int:
-        """Рассчитывает общую необходимую высоту для всех строк и заголовков."""
-
-        # 1. Высота горизонтального заголовка (столбцы 'Общий PFR', 'UTG', ...)
-        h_header_height = self.stats_table.horizontalHeader().sizeHint().height()
-
-        # 2. Общая высота строк
-        rows_height = 0
-        for i in range(self.stats_table.rowCount()):
-            # Берем высоту, рассчитанную resizeRowsToContents
-            rows_height += self.stats_table.rowHeight(i)
-
-        # 3. Добавим небольшой запас 🌟 (Для рамки и отступов)
-        padding = 30
-
-        total_height = h_header_height + rows_height + padding
-
-        # 4. Учитываем высоту остальных элементов в макете (заголовок окна)
-        # У нас есть метка (self.title_label) над таблицей
-        title_height = self.title_label.sizeHint().height()
-
-        # Общая высота окна
-        total_window_height = total_height + title_height + 5 # Дополнительный запас между заголовком и таблицей
-
-        return total_window_height
-
-    def update_stats(self, hands_data: Dict[str, int], pfr_data: Dict[str, str], rfi_data: Dict[str, str]):
-        """Обновляет данные в таблице."""
+    def update_stats_table(self, stats: Dict[str, Dict[str, Any]]):
+        """Заполняет таблицу данными."""
         positions = ["total", "utg", "mp", "co", "bu", "sb"]
+        
+        hands_data = stats.get('hands', {})
+        vpip_data = stats.get('vpip', {})
+        pfr_data = stats.get('pfr', {})
+        rfi_data = stats.get('rfi', {})
 
-        # 1. Заполнение строки "Рук" (Hands) - Строка 0
-        for col, pos in enumerate(positions):
-            hands = hands_data.get(pos, 0)
-            item = QTableWidgetItem(str(hands))
-            # 🌟 КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ 1: Установка выравнивания
+        # Вспомогательная функция для установки ячейки
+        def set_cell(row, col, value):
+            item = QTableWidgetItem(str(value))
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.stats_table.setItem(0, col, item) # Строка 0
+            self.stats_table.setItem(row, col, item)
 
-        # 2. Заполнение строки "PFR %" - Строка 1
-        for col, pos in enumerate(positions):
-            pfr = pfr_data.get(pos, "0.0")
-            item = QTableWidgetItem(str(pfr))
-            # 🌟 КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ 2: Установка выравнивания
-            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.stats_table.setItem(1, col, item) # Строка 1
+        for col_idx, pos in enumerate(positions):
+            # Row 0: Hands
+            set_cell(0, col_idx, hands_data.get(pos, 0))
+            # Row 1: VPIP
+            set_cell(1, col_idx, vpip_data.get(pos, "0.0"))
+            # Row 2: PFR
+            set_cell(2, col_idx, pfr_data.get(pos, "0.0"))
 
-        positions = ["utg", "mp", "co", "bu"]
-        for col, pos in enumerate(positions):
-            rfi = rfi_data.get(pos, "0.0")
-            item = QTableWidgetItem(str(rfi))
-            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.stats_table.setItem(2, col+1, item) # Строка 2
+        # Row 3: RFI (нет Total для RFI обычно, но если есть - выведем)
+        # У нас positions = ["total", ...], а RFI обычно с UTG.
+        # RFI data: utg, mp, co, bu, sb
+        rfi_positions = ["utg", "mp", "co", "bu", "sb"]
+        set_cell(3, 0, "-") # Total RFI often N/A or avg
+        
+        for i, pos in enumerate(rfi_positions):
+             # RFI start from col 1 (UTG)
+             set_cell(3, i+1, rfi_data.get(pos, "0.0"))
 
-        # 🌟 КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ 3: Принудительная перерисовка и подгонка размеров
+        # --- Update Blind Defense Stats ---
+        steal_succ = stats.get('steal_success', '-')
+        bb_def = stats.get('bb_defense', {})
+              # BB Defense Stats
+        bb_def = stats.get('bb_defense', {})
+        self.lbl_bb_fold.setText(f"BB Fold to Steal: {bb_def.get('fold_to_steal', '-')}%")
+        self.lbl_bb_call.setText(f"BB Call vs Steal: {bb_def.get('call_steal', '-')}%")
+        self.lbl_bb_3bet.setText(f"BB 3Bet vs Steal: {bb_def.get('3bet_steal', '-')}%")
+        
+        # Steal Success
+        steal_succ = stats.get('steal_success', '-')
+        self.lbl_steal_succ.setText(f"Steal Success: {steal_succ}%")
+        
+        # BB vs Limp Stats
+        bb_limp = stats.get('bb_vs_limp', {})
+        self.lbl_bb_check_limp.setText(f"BB Check vs Limp: {bb_limp.get('check', '-')}%")
+        self.lbl_bb_iso_limp.setText(f"BB Iso vs Limp: {bb_limp.get('iso', '-')}%")
         self.stats_table.viewport().update()
+        self.adjust_window_size()
 
+    def adjust_window_size(self):
+        """Подгоняет размер окна под контент."""
         self.stats_table.resizeColumnsToContents()
         self.stats_table.resizeRowsToContents()
+        
+        # Вычисляем высоту
+        h_header_h = self.stats_table.horizontalHeader().height()
+        rows_h = sum(self.stats_table.rowHeight(i) for i in range(self.stats_table.rowCount()))
+        total_table_h = h_header_h + rows_h + 10
+        
+        # Высота контролов и заголовка
+        # Можно использовать sizeHint, но мы дали Layout работать
+        # Просто используем adjustSize() Qt, он сам посчитает
+        self.adjustSize() 
 
-        new_width = self.calculate_table_width()
-        new_height = self.calculate_table_height()
-
-        self.setFixedSize(new_width, new_height)
-        self.adjustSize()
-
+    # --- DRAG & DROP UTILS ---
     def mousePressEvent(self, event: QMouseEvent):
-        """Начинает операцию перемещения при нажатии левой кнопки мыши."""
         if event.button() == Qt.MouseButton.LeftButton:
             self.dragging = True
-            # Запоминаем смещение (offset) между положением окна и точкой клика
             self.offset = event.globalPosition().toPoint() - self.pos()
             event.accept()
 
     def mouseMoveEvent(self, event: QMouseEvent):
-        """Перемещает окно вслед за курсором мыши."""
         if self.dragging:
-            # Новая позиция окна: Глобальная позиция курсора - сохраненное смещение
-            new_pos = event.globalPosition().toPoint() - self.offset
-            self.move(new_pos)
+            self.move(event.globalPosition().toPoint() - self.offset)
             event.accept()
 
     def mouseReleaseEvent(self, event: QMouseEvent):
-        """Завершает операцию перемещения."""
         if event.button() == Qt.MouseButton.LeftButton:
-            self.dragging = False
-            event.accept()
+             self.dragging = False
+             event.accept()

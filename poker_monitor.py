@@ -238,6 +238,8 @@ def process_file_full_load(file_path: str, filter_segment: Optional[str] = None,
         FILE_SIZES[file_path] = os.path.getsize(file_path)
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f"❌ Ошибка полной загрузки в {filename}: {e}")
 
 # --- ПОТОК МОНИТОРИНГА ---
