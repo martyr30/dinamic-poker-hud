@@ -20,6 +20,10 @@ from poker_globals import MY_PLAYER_NAME, TARGET_HISTORY_DIR, FILE_SIZES, StatUp
 from poker_monitor import WatchdogThread, MonitorSignals, process_file_full_load, is_tournament_file
 from poker_stats_db import setup_database, get_stats_for_players, get_player_extended_stats
 from personal_stats_hud import PersonalStatsWindow
+from datetime import datetime
+
+# Фиксируем время запуска программы для сессионной статистики Hero
+SESSION_START_TIME = datetime.now()
 
 # --- КЛАСС HUD ОКНА ---
 
@@ -221,6 +225,30 @@ class HUDWindow(QWidget):
             
             # 1. Находим место Хиро (Martyr40)
             hero_seat = self.current_table_players.get(MY_PLAYER_NAME, 0)
+            
+            # --- СЕССИОННАЯ СТАТИСТИКА ДЛЯ HERO ---
+            if MY_PLAYER_NAME in player_names:
+                 # Получаем статистику только начиная с запуска программы
+                 hero_session_stats = get_player_extended_stats(MY_PLAYER_NAME, "", min_time=SESSION_START_TIME)
+                 if hero_session_stats:
+                      # Преобразуем формат extended_stats в формат HUD
+                      # hero_session_stats = {'hands': {'total': X}, 'vpip': {'total': 'Y'}, ...}
+                      # player_stats = {'PlayerName': {'vpip': 'Y', ...}}
+                      
+                      # Создаем структуру, совместимую с общим player_stats
+                      hero_hud_data = {
+                          'hands': hero_session_stats['hands']['total'],
+                          'vpip': hero_session_stats['vpip']['total'],
+                          'pfr': hero_session_stats['pfr']['total'],
+                          # Остальные поля будут 0.0 или N/A, так как extended_stats их пока не считает (3bet, cbet...)
+                          '3bet': '0.0', 'f3bet': '0.0', 
+                          'cbet': '0.0', 'fcbet': '0.0',
+                          'wtsd': '0.0', 'wsd': '0.0',
+                          'af': '0.0'
+                      }
+                      # Перезаписываем статистику для Hero
+                      player_stats[MY_PLAYER_NAME] = hero_hud_data
+
             # Если Хиро нет за столом (наблюдатель), считаем, что он на месте 0 (или 1) для отсчета
             if hero_seat == 0:
                 # Пытаемся найти хоть какое-то место для отсчета, или оставляем 0
@@ -468,14 +496,6 @@ class HUDManager(QObject):
         except Exception as e:
             print(f"Ошибка создания окна личной статистики: {e}")
 
-        if self.personal_stats_window:
-            self.personal_stats_timer = QTimer()
-            # Обновление раз в 1 секунду
-            self.personal_stats_timer.setInterval(1000)
-            # Привязываем таймер к новому слоту
-            self.personal_stats_timer.timeout.connect(self.update_personal_stats)
-            self.personal_stats_timer.start()
-
     @Slot(object)
     def handle_update_signal(self, data: StatUpdateData):
         file_path, player_names, table_title_part, table_segment = data
@@ -489,25 +509,6 @@ class HUDManager(QObject):
 
         hud = self.active_huds[key]
         hud.update_data(data)
-
-    @Slot()
-    def update_personal_stats(self):
-        """Регулярно загружает и обновляет данные в окне личной статистики."""
-
-        # Проверяем, существует ли окно
-        if not self.personal_stats_window:
-            return
-
-        # 1. Загрузка данных ИЗ БАЗЫ ДАННЫХ
-        extended_stats = get_player_extended_stats(self.my_player_name, 'NL2_6MAX')
-        if extended_stats:
-            # 2. Обновление интерфейса
-            self.personal_stats_window.update_stats(
-                extended_stats["hands"],
-                extended_stats["pfr"],
-                extended_stats["rfi"]
-            )
-
 
     @Slot(str)
     def cleanup_closed_hud(self, file_path: str):

@@ -106,6 +106,7 @@ def setup_database_table(table_segment: str):
                 facing_bet_pct_pot DECIMAL(5,2),
                 opponent_position TEXT,
                 board_cards TEXT,
+                rfi_opportunity INTEGER DEFAULT 0,
 
                 PRIMARY KEY (hand_id, player_name)
             );
@@ -114,7 +115,8 @@ def setup_database_table(table_segment: str):
         # МИГРАЦИЯ my_hand_log
         log_columns_to_add = [
             "final_street", "final_action", "final_hand_strength",
-            "facing_bet_pct_pot", "opponent_position", "board_cards"
+            "facing_bet_pct_pot", "opponent_position", "board_cards",
+            "rfi_opportunity"
         ]
         for col in log_columns_to_add:
             try:
@@ -223,14 +225,97 @@ def determine_position(player_index_p: int, num_players_in_hand: int) -> Optiona
     if player_index_p == 2:
         return "bb"
 
+    # SUPPORT FOR 9-MAX (and other non-6max sizes)
+    # Standard 6-max positions: UTG, MP, CO, BU
+    # Standard 9-max positions: UTG, UTG+1, UTG+2, MP, MP+1, MP+2, CO, BU (approx)
+    
+    # DB Columns: pfr_utg, pfr_mp, pfr_co, pfr_bu
+    # We must map N positions to these 4 buckets to avoid crashes and save stats.
+    
+    # Bucket Mapping Strategy:
+    # 3-handed: BU
+    # 4-handed: CO, BU
+    # 5-handed: MP, CO, BU
+    # 6-handed: UTG, MP, CO, BU
+    # 9-handed: UTG, UTG+1, MP, MP+1, MP+2, CO, BU -> ep, ep, mp, mp, mp, co, bu
+    
     num_action_positions = num_players_in_hand - 2
-    skipped_positions = len(ACTION_POSITIONS) - num_action_positions
-    first_active_position_index = skipped_positions
-    action_index = player_index_p - 3
-    final_pos_index = first_active_position_index + action_index
+    if num_action_positions <= 0:
+        return None # Heads-up SB/BB only
 
-    if 0 <= final_pos_index < len(ACTION_POSITIONS):
-        return ACTION_POSITIONS[final_pos_index]
+    # Define Full Ring Positions (up to 9-handed = 7 action seats)
+    # We list them from early to late.
+    # 9-max action seats: UTG, UTG+1, MP, MP+1, HJ(MP2), CO, BU
+    full_ring_order = ['utg', 'utg', 'mp', 'mp', 'mp', 'co', 'bu']
+    
+    # If 6-max (4 seats): take last 4: utg, mp, co, bu? 
+    # Wait, full_ring_order[-4:] -> mp, mp, co, bu. NO.
+    # 6-max expected: UTG, MP, CO, BU.
+    
+    # Better approach: Define bucket list for current table size dynamically
+    if num_players_in_hand <= 6:
+        # 6-Max Logic (Standard)
+        # 3 items: [MP, CO, BU] ? No, usually [UTG, MP, CO, BU]
+        # But if 5 players? UTG is dropped? or MP dropped?
+        # Standard convention: Drop from Early.
+        # 6-max: UTG, MP, CO, BU
+        # 5-max: MP, CO, BU
+        # 4-max: CO, BU
+        # 3-max: BU
+        
+        # We can use the existing ACTION_POSITIONS logic for <= 6
+        # ACTION_POSITIONS = ["utg", "mp", "co", "bu"] (Len 4)
+        skipped = len(ACTION_POSITIONS) - num_action_positions # 4 - 4 = 0
+        if skipped < 0: skipped = 0 # Should not happen if size <= 6
+        
+        start_idx = skipped
+        action_idx = player_index_p - 3 # 0-based index of actor
+        final_idx = start_idx + action_idx
+        
+        if 0 <= final_idx < len(ACTION_POSITIONS):
+            return ACTION_POSITIONS[final_idx]
+            
+    else:
+        # 9-Max / Full Ring Logic (>6 players)
+        # We need to map 7 seats to [UTG, MP, CO, BU]
+        # Let's define a mapping for 7 seats (9-max):
+        # Seat 1 (UTG) -> UTG
+        # Seat 2 (UTG+1) -> UTG
+        # Seat 3 (MP) -> MP
+        # Seat 4 (MP+1) -> MP
+        # Seat 5 (HJ) -> MP
+        # Seat 6 (CO) -> CO
+        # Seat 7 (BU) -> BU
+        
+        # Create a specific list for the number of action seats available
+        # This is a heuristic map to compress 9-max into 4 buckets
+        map_9max = ['utg', 'utg', 'mp', 'mp', 'mp', 'co', 'bu'] # Length 7
+        
+        # If we have 8 players (6 action seats)? Drop first 'utg'.
+        # If we have 10 players? Add extra 'utg'.
+        
+        # General Algorithm: 
+        # Always have 1 BU, 1 CO.
+        # Remaining N-2 seats are split between EP(UTG) and MP.
+        # Let's say split roughly half-half.
+        
+        n_rem = num_action_positions - 2 # Exclude CO, BU
+        if n_rem < 0: n_rem = 0 # Should not happen for >6 players
+        
+        n_mp = n_rem // 2 + (n_rem % 2) # checking rounding? say 5 rem -> 3 MP, 2 UTG?
+        # Or usually more EP? 
+        # Let's stick to the list slicing for simplicity relying on max 9 players usually.
+        
+        # Slice from the end of the 9-max map
+        # If 7 action seats (9 players): take all 7.
+        # If 6 action seats (8 players): take last 6: utg, mp, mp, mp, co, bu
+        # If 5 action seats (7 players): take last 5: mp, mp, mp, co, bu
+        
+        current_map = map_9max[-num_action_positions:]
+        
+        action_idx = player_index_p - 3
+        if 0 <= action_idx < len(current_map):
+            return current_map[action_idx]
 
     return None
 
@@ -523,20 +608,25 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
                 'final_hand_strength': '',
                 'facing_bet_pct_pot': 0.0,
                 'opponent_position': '',
-                'board_cards': ''
+                'opponent_position': '',
+                'board_cards': '',
+                'rfi_opportunity': 0
             }
 
             # 1. ВРЕМЯ РАЗДАЧИ
-            # Извлекаем дату и время из HandHistory
-            # PokerKit обычно парсит дату в .date (datetime.date) и иногда время.
-            # Если hand_history имеет time, используем его.
             try:
-                hh_date = hand_history.date 
-                # Если time доступно (зависит от версии/парсера)
+                hh_date = getattr(hand_history, 'date', None)
                 hh_time = getattr(hand_history, 'time', None)
-                
+
+                # Fix for PokerKit versions where .date is not present but year/month/day are
+                if hh_date is None:
+                    if hasattr(hand_history, 'year') and hasattr(hand_history, 'month') and hasattr(hand_history, 'day'):
+                        # Ensure values are integers (sometimes None if parsing failed)
+                        if hand_history.year and hand_history.month and hand_history.day:
+                            hh_date = datetime.date(hand_history.year, hand_history.month, hand_history.day)
+
                 if isinstance(hh_date, datetime.date):
-                    if hh_time:
+                    if hh_time and isinstance(hh_time, datetime.time):
                          stats_update[player_name]['time_logged'] = datetime.datetime.combine(hh_date, hh_time)
                     else:
                          stats_update[player_name]['time_logged'] = datetime.datetime(hh_date.year, hh_date.month, hh_date.day)
@@ -577,19 +667,28 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
             if first_action and player_code == analyze_player_code:
                 first_action = False
                 stats_update[analyze_player_name]['first_action'] = action_type_code
-            # --- RFI ---
+            
+            # --- RFI Logic ---
+            # 1. Check Opportunity
             if player_code == analyze_player_code and state == '0rfi':
-                stats_update[analyze_player_name]['is_rfi'] = 1
+                stats_update[analyze_player_name]['rfi_opportunity'] = 1
 
+            # 2. Check Action
             if action_type_code != 'f':
-                if action_type_code == 'cbr':
+                if action_type_code == 'cbr': # 'cbr' = completion/bet/raise
                     if state == '0rfi':
+                        # If Hero raises in 0rfi state -> This is RFI
+                        if player_code == analyze_player_code:
+                             stats_update[analyze_player_name]['is_rfi'] = 1
+                        
                         state = '1bet'
                         stats_update[analyze_player_name]['first_raiser_position'] = player_map.get(player_code)[1]
                         if player_map.get(player_code)[1] in ('co', 'bu', 'sb'):
                             stats_update[analyze_player_name]['is_steal_attempt'] = 1
                 else:
-                    state = '0limp'
+                     # Call or Check -> Pot is no longer 0rfi if it was a limp, OR it remains 0rfi if check?
+                     # Wait. Preflop 'cc' in 0rfi is a limp.
+                     state = '0limp'
 
 
             # --- VPIP/PFR (Ваша логика) ---
@@ -766,7 +865,8 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
             'final_hand_strength': data['final_hand_strength'],
             'facing_bet_pct_pot': data['facing_bet_pct_pot'],
             'opponent_position': data['opponent_position'],
-            'board_cards': data['board_cards']
+            'board_cards': data['board_cards'],
+            'rfi_opportunity': data.get('rfi_opportunity', 0)
         }
     return final_stats
 
@@ -923,6 +1023,7 @@ def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
             facing_bet_pct_pot = data.get('facing_bet_pct_pot', 0.0)
             opponent_position = data.get('opponent_position', '')
             board_cards = data.get('board_cards', '')
+            rfi_opportunity = data.get('rfi_opportunity', 0)
 
             conn.execute("""
                 INSERT OR REPLACE INTO my_hand_log (
@@ -930,14 +1031,16 @@ def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
                     is_rfi, is_pfr, is_vpip, first_action, first_raiser_position,
                     is_steal_attempt, net_profit, time_logged,
                     final_street, final_action, final_hand_strength,
-                    facing_bet_pct_pot, opponent_position, board_cards
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    facing_bet_pct_pot, opponent_position, board_cards,
+                    rfi_opportunity
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 hand_id, table_part_name, player_name, position, cards,
                 is_rfi, is_pfr, is_vpip, first_action, first_raiser_position,
                 is_steal_attempt, net_profit, time_logged,
                 final_street, final_action, final_hand_strength,
-                facing_bet_pct_pot, opponent_position, board_cards
+                facing_bet_pct_pot, opponent_position, board_cards,
+                rfi_opportunity
             ))
         conn.commit()
     except Exception as e:
@@ -1027,89 +1130,131 @@ def get_stats_for_players(player_names: List[str], table_segment: str) -> Dict[s
 
 # --- 4. ФУНКЦИЯ ПОЛУЧЕНИЯ ЛИЧНОЙ СТАТИСТИКИ ---
 
-def get_player_extended_stats(player_name: str, table_segment: str) -> Optional[Dict[str, Dict[str, Any]]]:
-    """Извлекает расширенную статистику по позициям для конкретного игрока."""
+def get_player_extended_stats(player_name: str, table_segment: str, min_time: Optional[datetime.datetime] = None, max_time: Optional[datetime.datetime] = None) -> Optional[Dict[str, Dict[str, Any]]]:
+    """
+    Извлекает расширенную статистику для игрока из my_hand_log с фильтрацией по времени.
+    Агрегирует данные на лету.
+    """
     stats: Dict[str, Dict[str, Any]] = {}
-    if not player_name:
-        return stats
-
-    safe_table_name = table_segment.replace("'", "").replace(";", "").replace(" ", "")
 
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
 
-        # Суммируем статистику по всем сегментам столов (т.к. это личный HUD)
-        cursor.execute(f"""
+        # Базовый запрос
+        query = """
             SELECT
-                hands, pfr_hands, vpip_hands,
-                hands_utg, pfr_utg,
-                hands_mp, pfr_mp,
-                hands_co, pfr_co,
-                hands_bu, pfr_bu,
-                hands_sb, pfr_sb,
-                rfi_opp_utg, rfi_succ_utg,
-                rfi_opp_mp, rfi_succ_mp,
-                rfi_opp_co, rfi_succ_co,
-                rfi_opp_bu, rfi_succ_bu
-            FROM {safe_table_name}
+                COUNT(*) as total_hands,
+                SUM(is_pfr) as total_pfr,
+                SUM(is_vpip) as total_vpip,
+                position,
+                SUM(is_rfi) as total_rfi,
+                SUM(rfi_opportunity) as total_rfi_opp
+            FROM my_hand_log
             WHERE player_name = ?
-        """, (player_name,))
+        """
+        params = [player_name]
 
-        row = cursor.fetchone()
+        if min_time:
+            query += " AND time_logged >= ?"
+            params.append(min_time)
+        
+        if max_time:
+            query += " AND time_logged <= ?"
+            params.append(max_time)
+            
+        query += " GROUP BY position"
+
+        cursor.execute(query, params)
         results = cursor.fetchall()
-        if not row or row[0] is None:
-            return None
+        
+        if not results:
+             # Если данных нет, возвращаем нули
+             return {
+                "hands": {"total": 0, "utg":0, "mp":0, "co":0, "bu":0, "sb":0, "bb":0},
+                "pfr": {"total": "0.0", "utg":"0.0", "mp":"0.0", "co":"0.0", "bu":"0.0", "sb":"0.0", "bb":"0.0"},
+                "rfi": {"utg":"0.0", "mp":"0.0", "co":"0.0", "bu":"0.0", "sb":"0.0"}
+             }
 
-        # Порядок столбцов: total_hands, total_pfr_actions, total_vpip_actions, hands_utg, pfr_utg, ...
+        # Инициализация структур
+        hands_data = {"total": 0, "utg":0, "mp":0, "co":0, "bu":0, "sb":0, "bb":0}
+        pfr_counts = {"total": 0, "utg":0, "mp":0, "co":0, "bu":0, "sb":0, "bb":0}
+        vpip_counts = {"total": 0, "utg":0, "mp":0, "co":0, "bu":0, "sb":0, "bb":0}
+        rfi_counts = {"utg":0, "mp":0, "co":0, "bu":0, "sb":0}
+        rfi_opps = {"utg":0, "mp":0, "co":0, "bu":0, "sb":0}
+        
+        total_hands_all = 0
+        total_pfr_all = 0
+        total_vpip_all = 0
 
-        # Вспомогательная функция для расчета PFR %
-        def calculate_pfr_percent(actions, hands):
-            return round((actions / hands) * 100, 1) if hands > 0 else 0.0
+        for row in results:
+            # row: 0=hands, 1=pfr_sum, 2=vpip_sum, 3=position, 4=rfi_sum, 5=rfi_opp
+            cnt_hands = row[0]
+            cnt_pfr = row[1]
+            cnt_vpip = row[2]
+            pos = row[3].lower()
+            cnt_rfi = row[4]
+            cnt_rfi_opp = row[5]
 
-        # 1. Данные по рукам (Hands Data)
-        hands_data = {
-            "total": row[0] or 0,
-            "utg": row[3] or 0,
-            "mp": row[5] or 0,
-            "co": row[7] or 0,
-            "bu": row[9] or 0,
-            "sb": row[11] or 0,
+            # Агрегация по позициям
+            if pos in hands_data:
+                hands_data[pos] = cnt_hands
+                pfr_counts[pos] = cnt_pfr
+                vpip_counts[pos] = cnt_vpip
+            
+            # Агрегация RFI
+            if pos in rfi_counts:
+                rfi_counts[pos] = cnt_rfi
+                rfi_opps[pos] = cnt_rfi_opp
+
+            total_hands_all += cnt_hands
+            total_pfr_all += cnt_pfr
+            total_vpip_all += cnt_vpip
+
+        hands_data["total"] = total_hands_all
+        
+        # Расчет процентов
+        def calc_pct(num, den):
+            return f"{round((num / den) * 100, 1)}" if den > 0 else "0.0"
+
+        pfr_fmt = {
+            "total": calc_pct(total_pfr_all, total_hands_all),
+            "utg": calc_pct(pfr_counts["utg"], hands_data["utg"]),
+            "mp": calc_pct(pfr_counts["mp"], hands_data["mp"]),
+            "co": calc_pct(pfr_counts["co"], hands_data["co"]),
+            "bu": calc_pct(pfr_counts["bu"], hands_data["bu"]),
+            "sb": calc_pct(pfr_counts["sb"], hands_data["sb"]),
+            "bb": calc_pct(pfr_counts["bb"], hands_data["bb"]),
+        }
+        
+        rfi_fmt = {
+            "utg": calc_pct(rfi_counts["utg"], rfi_opps["utg"]),
+            "mp": calc_pct(rfi_counts["mp"], rfi_opps["mp"]),
+            "co": calc_pct(rfi_counts["co"], rfi_opps["co"]),
+            "bu": calc_pct(rfi_counts["bu"], rfi_opps["bu"]),
+            "sb": calc_pct(rfi_counts["sb"], rfi_opps["sb"]),
         }
 
-        # 2. Данные по PFR (PFR %)
-        pfr_data = {
-            "total": calculate_pfr_percent(row[1] or 0, row[0] or 0),
-            "utg": calculate_pfr_percent(row[4] or 0, row[3] or 0),
-            "mp": calculate_pfr_percent(row[6] or 0, row[5] or 0),
-            "co": calculate_pfr_percent(row[8] or 0, row[7] or 0),
-            "bu": calculate_pfr_percent(row[10] or 0, row[9] or 0),
-            "sb": calculate_pfr_percent(row[12] or 0, row[11] or 0),
+        vpip_fmt = {
+            "total": calc_pct(total_vpip_all, total_hands_all),
+            "utg": calc_pct(vpip_counts["utg"], hands_data["utg"]),
+            "mp": calc_pct(vpip_counts["mp"], hands_data["mp"]),
+            "co": calc_pct(vpip_counts["co"], hands_data["co"]),
+            "bu": calc_pct(vpip_counts["bu"], hands_data["bu"]),
+            "sb": calc_pct(vpip_counts["sb"], hands_data["sb"]),
+            "bb": calc_pct(vpip_counts["bb"], hands_data["bb"]),
         }
 
-        # 3. Данные по RFI (RFI %)
-        rfi_data = {
-            "utg": calculate_pfr_percent(row[14] or 0, row[13] or 0),
-            "mp": calculate_pfr_percent(row[16] or 0, row[15] or 0),
-            "co": calculate_pfr_percent(row[18] or 0, row[17] or 0),
-            "bu": calculate_pfr_percent(row[20] or 0, row[19] or 0),
-        }
-
-
-        # Возвращаем форматированные данные
         stats = {
             "hands": hands_data,
-            "pfr": {k: f"{v:.1f}" for k, v in pfr_data.items()}, # Форматируем в строку с 1 знаком
-            "rfi": {k: f"{v:.1f}" for k, v in rfi_data.items()}
+            "vpip": vpip_fmt,
+            "pfr": pfr_fmt,
+            "rfi": rfi_fmt
         }
 
-    except sqlite3.OperationalError as e:
-        # Игнорируем ошибку, если таблица еще не существует
-        if "no such table" in str(e):
-             return stats
-        raise e
     except Exception as e:
-        print(f"❌ Ошибка при получении статистики из БД ('{table_segment}'): {e}")
+        print(f"❌ Ошибка при получении статистики Hero ({min_time}-{max_time}): {e}")
+        return None
     finally:
         if conn:
             conn.close()
