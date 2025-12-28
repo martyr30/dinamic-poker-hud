@@ -142,9 +142,12 @@ class PersonalStatsWindow(QWidget):
 
         # --- Blind Defense & Steal Stats Section ---
         # A separate container for new stats
+        # --- Blind Defense & Steal Stats Section ---
+        # A separate container for new stats
         self.defense_group = QFrame()
-        defense_layout = QHBoxLayout(self.defense_group)
-        defense_layout.setContentsMargins(0, 5, 0, 0)
+        defense_main_layout = QVBoxLayout(self.defense_group) # Main Vertical Layout
+        defense_main_layout.setContentsMargins(0, 5, 0, 0)
+        defense_main_layout.setSpacing(2) # Tight spacing
         
         # Helper to create styled labels
         def create_stat_label(text):
@@ -156,24 +159,57 @@ class PersonalStatsWindow(QWidget):
         self.lbl_bb_fold = create_stat_label("BB Fold to Steal: -")
         self.lbl_bb_call = create_stat_label("BB Call vs Steal: -")
         self.lbl_bb_3bet = create_stat_label("BB 3Bet vs Steal: -")
-        
-        defense_layout.addWidget(self.lbl_steal_succ)
-        defense_layout.addStretch()
-        defense_layout.addWidget(self.lbl_bb_fold)
-        defense_layout.addWidget(self.lbl_bb_call)
-        defense_layout.addWidget(self.lbl_bb_3bet)
-        
-        # --- Limp Stats (New Row/Section) ---
-        # Adding to same layout might be crowded. Let's add a separator or spacing.
-        defense_layout.addSpacing(20)
         self.lbl_bb_check_limp = create_stat_label("BB Check vs Limp: -")
         self.lbl_bb_iso_limp = create_stat_label("BB Iso vs Limp: -")
-        defense_layout.addWidget(self.lbl_bb_check_limp)
-        defense_layout.addWidget(self.lbl_bb_iso_limp)
+        
+        # New Aggression Labels
+        self.lbl_3bet = create_stat_label("3-Bet: -")
+        self.lbl_cbet = create_stat_label("C-Bet: -")
+        self.lbl_fold_to_cbet = create_stat_label("Fold to C-Bet: -")
+        
+        self.lbl_wtsd = create_stat_label("WTSD: -")
+        self.lbl_wsd = create_stat_label("WSD: -")
+
+        # Row 1: Steal Success
+        row1 = QHBoxLayout()
+        row1.addWidget(self.lbl_steal_succ)
+        row1.addStretch()
+        defense_main_layout.addLayout(row1)
+
+        # Row 2: BB vs Steal (Fold, Call, 3Bet)
+        row2 = QHBoxLayout()
+        row2.addWidget(self.lbl_bb_fold)
+        row2.addWidget(self.lbl_bb_call)
+        row2.addWidget(self.lbl_bb_3bet)
+        row2.addStretch()
+        defense_main_layout.addLayout(row2)
+        
+        # Row 3: BB vs Limp
+        row3 = QHBoxLayout()
+        row3.addWidget(self.lbl_bb_check_limp)
+        row3.addWidget(self.lbl_bb_iso_limp)
+        row3.addStretch()
+        defense_main_layout.addLayout(row3)
+        
+        # Row 3.5: Aggression (3-Bet, C-Bet, FcBet)
+        row_agg = QHBoxLayout()
+        row_agg.addWidget(self.lbl_3bet)
+        row_agg.addWidget(self.lbl_cbet)
+        row_agg.addWidget(self.lbl_fold_to_cbet)
+        row_agg.addStretch()
+        defense_main_layout.addLayout(row_agg)
+        
+        # Row 4: WTSD / WSD
+        row4 = QHBoxLayout()
+        row4.addWidget(self.lbl_wtsd)
+        row4.addWidget(self.lbl_wsd)
+        row4.addStretch()
+        defense_main_layout.addLayout(row4)
         
         self.main_layout.addWidget(self.defense_group)
 
         # Начальная загрузка
+        self.move(20, 50) # Closer to top-left
         self.show()
         # Даем интерфейсу время на отрисовку перед обновлением данных
         QTimer.singleShot(100, self.refresh_stats)
@@ -288,6 +324,21 @@ class PersonalStatsWindow(QWidget):
         bb_limp = stats.get('bb_vs_limp', {})
         self.lbl_bb_check_limp.setText(f"BB Check vs Limp: {bb_limp.get('check', '-')}%")
         self.lbl_bb_iso_limp.setText(f"BB Iso vs Limp: {bb_limp.get('iso', '-')}%")
+        
+        # Aggression Stats
+        t3bet = stats.get('3bet', {}).get('total', '-')
+        cbet = stats.get('cbet', {}).get('total', '-')
+        fcbet = stats.get('fold_to_cbet', {}).get('total', '-')
+        
+        self.lbl_3bet.setText(f"3-Bet: {t3bet}%")
+        self.lbl_cbet.setText(f"C-Bet: {cbet}%")
+        self.lbl_fold_to_cbet.setText(f"Fold to C-Bet: {fcbet}%")
+        
+        # WTSD/WSD
+        wtsd_data = stats.get('wtsd', {})
+        self.lbl_wtsd.setText(f"WTSD: {wtsd_data.get('wtsd', '-')}%")
+        self.lbl_wsd.setText(f"WSD: {wtsd_data.get('wsd', '-')}%")
+
         self.stats_table.viewport().update()
         self.adjust_window_size()
 

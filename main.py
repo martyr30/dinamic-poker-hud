@@ -11,9 +11,12 @@ from typing import Dict, Any, Optional, List
 from PySide6.QtWidgets import (
     QApplication, QWidget, QLabel, QVBoxLayout, QSizePolicy
 )
-from PySide6.QtCore import Qt, QTimer, Slot, QObject, Signal, QCoreApplication
+from PySide6.QtCore import Qt, QTimer, Slot, QObject, Signal, QCoreApplication, QRect
 from PySide6.QtGui import QFont
-import pywinctl as pwc
+if sys.platform != 'darwin':
+    import pywinctl as pwc
+else:
+    pwc = None
 
 # Импорт модулей проекта (предполагается, что они доступны)
 from poker_globals import MY_PLAYER_NAME, TARGET_HISTORY_DIR, FILE_SIZES, StatUpdateData
@@ -21,8 +24,8 @@ from poker_monitor import WatchdogThread, MonitorSignals, process_file_full_load
 from poker_stats_db import setup_database, get_stats_for_players, get_player_extended_stats
 from personal_stats_hud import PersonalStatsWindow
 from datetime import datetime
-
-# Фиксируем время запуска программы для сессионной статистики Hero
+# Import Custom MacOS Adapter to bypass pywinctl issues
+from macos_window_utils import MacOSWindowAdapter
 SESSION_START_TIME = datetime.now()
 
 # --- КЛАСС HUD ОКНА ---
@@ -81,7 +84,10 @@ class HUDWindow(QWidget):
         # Таймер для регулярного позиционирования
         self.pos_timer = QTimer(self)
         self.pos_timer.timeout.connect(self.update_hud_position)
-        self.pos_timer.start(20)
+        if sys.platform == 'darwin':
+            self.pos_timer.start(500) # 500ms for macOS (osascript is slow)
+        else:
+            self.pos_timer.start(20) # 20ms for Windows/Linux
 
         # Таймер для задержки удаления (5 секунд)
         self.deletion_timer = QTimer(self)
@@ -93,6 +99,9 @@ class HUDWindow(QWidget):
 
     def is_target_window_still_active(self, window_obj) -> bool:
         """Проверяет, существует ли объект окна pywinctl в списке активных окон по его ID."""
+        if isinstance(window_obj, MacOSWindowAdapter):
+            return window_obj.exists()
+
         if not window_obj:
             return False
 
@@ -119,6 +128,22 @@ class HUDWindow(QWidget):
 
     def find_target_window(self):
         """Находит целевое окно по имени стола."""
+        # --- MACOS FIX ---
+        if sys.platform == 'darwin':
+            adapter = MacOSWindowAdapter(self.active_table_name)
+            if adapter.exists():
+                self.target_window = adapter
+                self.rect = QRect(adapter.left, adapter.top, adapter.width, adapter.height)
+                # print(f"HUD FOUND (macOS): {self.active_table_name} -> {self.rect}")
+                return True
+            print("-" * 64)
+            # Use AppleScript to list windows for debug
+            # We simply print that we are on macOS
+            print(" (macOS: pywinctl disabled. Check permissions or macos_window_utils logs)")
+            print("-" * 64)
+            return False
+        # -----------------
+
         target_part = self.active_table_name
 
         try:
@@ -240,11 +265,16 @@ class HUDWindow(QWidget):
                           'hands': hero_session_stats['hands']['total'],
                           'vpip': hero_session_stats['vpip']['total'],
                           'pfr': hero_session_stats['pfr']['total'],
-                          # Остальные поля будут 0.0 или N/A, так как extended_stats их пока не считает (3bet, cbet...)
-                          '3bet': '0.0', 'f3bet': '0.0', 
-                          'cbet': '0.0', 'fcbet': '0.0',
-                          'wtsd': '0.0', 'wsd': '0.0',
-                          'af': '0.0'
+                          '3bet': hero_session_stats.get('3bet', {}).get('total', '0.0'),
+                          'f3bet': '0.0', # Fold to 3Bet not yet in extended stats (Step 2542/2554 logic pending) or mapped?
+                          # Wait, I mapped Fold To CBet, but not Fold To 3Bet in extended_stats schema yet?
+                          # Let's check keys in test_extended_stats output (Step 2522): 'fold_to_cbet'. 
+                          # No 'fold_to_3bet'. So f3bet is indeed 0.0 for now.
+                          'cbet': hero_session_stats.get('cbet', {}).get('total', '0.0'),
+                          'fcbet': hero_session_stats.get('fold_to_cbet', {}).get('total', '0.0'),
+                          'wtsd': hero_session_stats.get('wtsd', {}).get('wtsd', '0.0'), # Nested wtsd?
+                          'wsd': hero_session_stats.get('wtsd', {}).get('wsd', '0.0'),
+                          'af': '0.0' # AF not in extended stats?
                       }
                       # Перезаписываем статистику для Hero
                       player_stats[MY_PLAYER_NAME] = hero_hud_data

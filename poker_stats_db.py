@@ -48,6 +48,8 @@ def setup_database_table(table_segment: str):
     """Создает таблицу статистики с уникальным именем, если она не существует."""
     try:
         conn = sqlite3.connect(DB_NAME)
+        # Enable Write-Ahead Logging for better concurrency
+        conn.execute("PRAGMA journal_mode=WAL;")
         cursor = conn.cursor()
 
         safe_table_name = table_segment.replace("'", "").replace(";", "").replace(" ", "")
@@ -149,6 +151,18 @@ def setup_database_table(table_segment: str):
                 facing_limp INTEGER DEFAULT 0,
                 is_limp_check INTEGER DEFAULT 0,
                 is_limp_iso INTEGER DEFAULT 0,
+                
+                -- WTSD & WSD
+                wtsd INTEGER DEFAULT 0,
+                wsd INTEGER DEFAULT 0,
+                
+                -- C-Bet & 3-Bet Stats
+                is_3bet INTEGER DEFAULT 0,
+                is_3bet_opp INTEGER DEFAULT 0,
+                is_cbet INTEGER DEFAULT 0,
+                cbet_opp INTEGER DEFAULT 0,
+                is_fold_to_cbet INTEGER DEFAULT 0,
+                fold_to_cbet_opp INTEGER DEFAULT 0,
 
                 PRIMARY KEY (hand_id, player_name)
             );
@@ -158,15 +172,16 @@ def setup_database_table(table_segment: str):
         log_columns_to_add = [
             "final_street", "final_action", "final_hand_strength",
             "facing_bet_pct_pot", "opponent_position", "board_cards",
-            "final_street", "final_action", "final_hand_strength",
-            "facing_bet_pct_pot", "opponent_position", "board_cards",
-            "rfi_opportunity", "normalized_hand", "facing_limp", "is_limp_check", "is_limp_iso"
+            "rfi_opportunity", "normalized_hand", "facing_limp", "is_limp_check", "is_limp_iso",
+            "wtsd", "wsd",
+            "is_3bet", "is_3bet_opp", "is_cbet", "cbet_opp", "is_fold_to_cbet", "fold_to_cbet_opp"
         ]
         for col in log_columns_to_add:
             try:
-                # Определяем тип данных для колонки
                 col_type = "TEXT"
                 if "pct_pot" in col: col_type = "DECIMAL(5,2)"
+                elif any(x in col for x in ["rfi_opportunity", "is_limp", "facing_limp", "wtsd", "wsd", "is_3bet", "cbet", "fold_to_cbet", "opp"]): 
+                    col_type = "INTEGER DEFAULT 0"
                 
                 cursor.execute(f"ALTER TABLE my_hand_log ADD COLUMN {col} {col_type}")
             except sqlite3.OperationalError:
@@ -508,14 +523,8 @@ def analyze_hand_for_stats(hand_history: HandHistory):
                             # But better: Only count RFI if Raise.
                             stats_update[player_name][key_to_update] = 1
                         elif action_type_code == 'cc':
-                             state = '0limp'
-                             # Limp is NOT RFI success in standard terms.
-                             # But passing it as success just to not break existing "RFI" stat if user relies on it?
-                             # Let's count it for now to avoid side effects, OR disable it.
-                             # If I disable it, RFI% drops.
-                             # Given "DinamicHUD" context, likely RFI = PFR from open?
-                             # Let's leave stats_update for now but fix STATE.
-                             stats_update[player_name][key_to_update] = 1
+                            state = '0limp'
+                            stats_update[player_name][key_to_update] = 1
 
                 # --- PFR ---
                 if action_type_code == 'cbr':
@@ -706,9 +715,17 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
                 # New BB Defense & Steal stats
                 'facing_steal': 0,
                 'is_steal_defend': 0,
+                'is_steal_defend': 0,
                 'is_steal_3bet': 0,
                 'is_steal_fold': 0,
-                'steal_success': 0
+                'steal_success': 0,
+                # C-Bet & 3-Bet (New)
+                'is_3bet_pre': 0,
+                'is_3bet_opp_pre': 0,
+                'cbet_flop_succ': 0,
+                'cbet_flop_opp': 0,
+                'is_fold_to_cbet': 0, # fcbet_flop_succ
+                'fold_to_cbet_opp': 0  # fcbet_flop_opp
             }
 
             # 1. ВРЕМЯ РАЗДАЧИ
@@ -744,11 +761,14 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
                 # Перевызываем ошибку, чтобы увидеть полный traceback
                 raise
     # --- Отслеживание префлоп-действий ---
+    active_players = set(all_players) # Track active players for WTSD
     state = '0rfi' # 0rfi, 0limp, 1bet, 3bet, 4bet
     first_action = True
     is_steal_attempt = False # Глобальный флаг для текущей улицы (кто-то стилит)
 
-    # 1.1 Префлоп: Основные действия и определение 3-бетов
+    # 1.1 Preflop: Basic Actions, 3-Bet, Steal
+    last_raiser = None # For C-Bet tracking
+    
     for action_str in hand_history.actions:
         parts = action_str.split()
         # print(parts[3])
@@ -762,6 +782,7 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
         if action_str.startswith('p'):
             player_code = parts[0]
             action_type_code = parts[1]
+            player_name = player_map[player_code][0]
 
             if first_action and player_code == analyze_player_code:
                 first_action = False
@@ -810,6 +831,22 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
                      if state == '0rfi':
                          state = '0limp'
             
+            # --- 3-BET TRACKING (PREFLOP) ---
+            if state_before_action == '1bet':
+                # Facing Open Raise -> 3bet Opportunity
+                if player_code == analyze_player_code:
+                     stats_update[analyze_player_name]['is_3bet_opp_pre'] = 1
+                
+                if action_type_code == 'cbr':
+                     # 3-Bet Made
+                     if player_code == analyze_player_code:
+                         stats_update[analyze_player_name]['is_3bet_pre'] = 1
+                     state = '2bet' # Upgrade state to 3-bet pot
+
+            # Update Last Raiser (for C-Bet)
+            if action_type_code == 'cbr':
+                last_raiser = player_name
+
             # --- BB Defense Logic (Facing Steal) ---
             # If Hero is on BB (or SB), and previous action was a Steal Attempt (Raise from Late Pos)
             # We use state_before_action to see what we FACED.
@@ -866,6 +903,7 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
                 # rbr (Raise) - это PFR
                 if action_type_code in ('cbr'):
                     stats_update[analyze_player_name]['is_pfr'] = 1
+        
 
     # 1.2 Подсчет инвестиций и выигрыша.
     # Мы должны отслеживать ставки на каждой улице (префлоп, флоп, терн, ривер),
@@ -881,10 +919,16 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
     last_bet_by_player = {'player': None, 'amount': Decimal('0.00')}
     last_action_was_fold = False
     
-    # Для трекинга финального состояния
+    # For final state tracking
     current_board_cards = ""
-    last_aggressor_pos = "" # Позиция того, кто сделал Bet/Raise последним
-    pot_before_street = Decimal('0.00') # Размер банка до начала улицы
+    last_aggressor_pos = ""
+    pot_before_street = Decimal('0.00')
+    
+    # C-Bet / Fold to C-Bet Tracking
+    preflop_aggressor = last_raiser # Passed from Loop 1 (if Loop 1 found a raiser)
+    postflop_has_bet = False
+    flop_cbet_made = False
+    f2cbet_counted = False
     
     decimal.getcontext().prec = 10 # Увеличиваем точность для Decimal
 
@@ -922,7 +966,12 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
             current_board_cards += new_board_cards
             
             # Обновляем улицу для анализа
-            if current_street == 'preflop': current_street = 'flop'
+            if current_street == 'preflop': 
+                current_street = 'flop'
+                # Reset Flop Flags
+                postflop_has_bet = False
+                flop_cbet_made = False
+                f2cbet_counted = False
             elif current_street == 'flop': current_street = 'turn'
             elif current_street == 'turn': current_street = 'river'
             
@@ -931,6 +980,36 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
         if action_str.startswith('p'):
             player_code = parts[0]
             action_type_code = parts[1]
+            player_data = player_map.get(player_code)
+            if not player_data:
+                continue
+            player_name = player_data[0]
+
+            # --- C-BET LOGIC (FLOP ONLY) ---
+            if current_street == 'flop':
+                 # Check C-Bet Opportunity (Bet OR Check by Aggressor)
+                 if player_name == preflop_aggressor and not postflop_has_bet:
+                      if player_name == analyze_player_name:
+                          stats_update[analyze_player_name]['cbet_flop_opp'] = 1
+                      
+                      if action_type_code == 'cbr':
+                          if player_name == analyze_player_name:
+                              stats_update[analyze_player_name]['cbet_flop_succ'] = 1
+                          flop_cbet_made = True
+                 # Check Fold to C-Bet
+                 if flop_cbet_made and not f2cbet_counted:
+                     # If previous action was C-Bet, and this player acts
+                     # Exclude aggressor
+                     if player_name != preflop_aggressor:
+                         if player_name == analyze_player_name:
+                             stats_update[analyze_player_name]['fold_to_cbet_opp'] = 1
+                             f2cbet_counted = True # Only count once per hand for Hero?
+                             if action_type_code == 'f':
+                                 stats_update[analyze_player_name]['is_fold_to_cbet'] = 1
+            
+            # Update postflop_has_bet
+            if action_type_code == 'cbr':
+                postflop_has_bet = True
             last_action_was_fold = False
 
             if action_type_code == 'cbr': # Bet/Raise
@@ -971,6 +1050,7 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
 
             elif action_type_code == 'f': # Fold
                 last_action_was_fold = True
+                active_players.discard(player_name)
 
             # --- ЗАПИСЬ ИНФОРМАЦИИ ПРИ ДЕЙСТВИИ ХИРО ---
             if player_code == analyze_player_code:
@@ -990,6 +1070,10 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
                         facing_pct = float(to_call / current_pot) * 100
 
                 stats_update[analyze_player_name]['final_street'] = current_street
+                if action_type_code == 'f':
+                     # Track Active Players (Fold/Muck removes from active)
+                     # active_players.discard(analyze_player_name) # Handled globally now
+                     pass
                 stats_update[analyze_player_name]['final_action'] = 'Fold' if action_type_code == 'f' else ('Call' if action_type_code == 'cc' else 'Raise')
                 stats_update[analyze_player_name]['facing_bet_pct_pot'] = facing_pct
                 stats_update[analyze_player_name]['opponent_position'] = last_aggressor_pos
@@ -1009,6 +1093,10 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
         player_bet -= uncalled_bet
 
     stats_update[analyze_player_name]['net_profit'] = player_win - player_bet
+    
+    # Update final_street for active players (e.g. All-in Preflop -> saw River)
+    if analyze_player_name in active_players:
+        stats_update[analyze_player_name]['final_street'] = current_street
     
     # --- STEAL SUCCESS CHECK ---
     # Если мы делали стил, и раздача закончилась на префлопе, и мы выиграли (нет профит > 0)
@@ -1052,12 +1140,28 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
             # BB vs Limp Stats
             'facing_limp': data.get('facing_limp', 0),
             'is_limp_check': data.get('is_limp_check', 0),
-            'is_limp_iso': data.get('is_limp_iso', 0)
+            'is_limp_iso': data.get('is_limp_iso', 0),
+            # WTSD/WSD
+            'wtsd': data.get('wtsd', 0),
+            'wsd': data.get('wsd', 0),
+            # C-Bet & 3-Bet (Map from internal keys)
+            'is_3bet_pre': data.get('is_3bet_pre', 0),
+            'is_3bet_opp_pre': data.get('is_3bet_opp_pre', 0),
+            'cbet_flop_succ': data.get('cbet_flop_succ', 0),
+            'cbet_flop_opp': data.get('cbet_flop_opp', 0),
+            'fcbet_flop_succ': data.get('is_fold_to_cbet', 0), # Internal: is_fold_to_cbet
+            'fcbet_flop_opp': data.get('fold_to_cbet_opp', 0)  # Internal: fold_to_cbet_opp
         }
+    
+    # Calculate WTSD/WSD for Hero
+    was_showdown = len(active_players) > 1
+    if analyze_player_name in active_players and was_showdown:
+        final_stats[analyze_player_name]['wtsd'] = 1
+        if final_stats[analyze_player_name].get('net_profit', 0) > 0:
+            final_stats[analyze_player_name]['wsd'] = 1
+
+
     return final_stats
-
-
-# --- 3. ФУНКЦИЯ ОБНОВЛЕНИЯ СТАТИСТИКИ ---
 
 def update_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]], table_segment: str):
     """Обновляет статистику в динамической таблице, включая 3Bet и Fold to 3Bet."""
@@ -1067,6 +1171,7 @@ def update_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]], table_segment
     setup_database_table(table_segment)
     safe_table_name = table_segment.replace("'", "").replace(";", "").replace(" ", "")
 
+    conn = None
     try:
         conn = sqlite3.connect(DB_NAME)
         cursor = conn.cursor()
@@ -1221,6 +1326,18 @@ def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
             is_limp_check = data.get('is_limp_check', 0)
             is_limp_iso = data.get('is_limp_iso', 0)
             
+            # WTSD
+            wtsd = data.get('wtsd', 0)
+            wsd = data.get('wsd', 0)
+            
+            # C-Bet & 3-Bet (Updated Keys)
+            is_3bet = data.get('is_3bet_pre', 0)
+            is_3bet_opp = data.get('is_3bet_opp_pre', 0)
+            is_cbet = data.get('cbet_flop_succ', 0)
+            cbet_opp = data.get('cbet_flop_opp', 0)
+            is_fold_to_cbet = data.get('fcbet_flop_succ', 0)
+            fold_to_cbet_opp = data.get('fcbet_flop_opp', 0)
+            
             # Normalize Hand for Chart
             normalized_hand = normalize_cards(cards)
 
@@ -1233,8 +1350,10 @@ def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
                     facing_bet_pct_pot, opponent_position, board_cards,
                     rfi_opportunity,
                     facing_steal, is_steal_defend, is_steal_3bet, is_steal_fold, steal_success,
-                    facing_limp, is_limp_check, is_limp_iso, normalized_hand
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    facing_limp, is_limp_check, is_limp_iso, normalized_hand,
+                    wtsd, wsd,
+                    is_3bet, is_3bet_opp, is_cbet, cbet_opp, is_fold_to_cbet, fold_to_cbet_opp
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 hand_id, table_part_name, player_name, position, cards,
                 is_rfi, is_pfr, is_vpip, first_action, first_raiser_position,
@@ -1243,7 +1362,9 @@ def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
                 facing_bet_pct_pot, opponent_position, board_cards,
                 rfi_opportunity,
                 facing_steal, is_steal_defend, is_steal_3bet, is_steal_fold, steal_success,
-                facing_limp, is_limp_check, is_limp_iso, normalized_hand
+                facing_limp, is_limp_check, is_limp_iso, normalized_hand,
+                wtsd, wsd,
+                is_3bet, is_3bet_opp, is_cbet, cbet_opp, is_fold_to_cbet, fold_to_cbet_opp
             ))
         conn.commit()
     except Exception as e:
@@ -1367,7 +1488,20 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
                 -- New BB vs Limp Stats
                 SUM(facing_limp) as facing_limp_sum,
                 SUM(is_limp_check) as limp_check_sum,
-                SUM(is_limp_iso) as limp_iso_sum
+                SUM(is_limp_iso) as limp_iso_sum,
+                
+                -- WTSD & Saw Flop
+                SUM(wtsd) as wtsd_sum,
+                SUM(wsd) as wsd_sum,
+                SUM(CASE WHEN final_street != 'preflop' OR wtsd = 1 THEN 1 ELSE 0 END) as saw_flop_sum,
+                
+                -- C-Bet & 3-Bet
+                SUM(is_3bet) as p3bet_sum,
+                SUM(is_3bet_opp) as p3bet_opp_sum,
+                SUM(is_cbet) as cbet_sum,
+                SUM(cbet_opp) as cbet_opp_sum,
+                SUM(is_fold_to_cbet) as fcbet_sum,
+                SUM(fold_to_cbet_opp) as fcbet_opp_sum
             
             FROM my_hand_log 
             WHERE player_name = ?
@@ -1388,12 +1522,7 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
         results = cursor.fetchall()
         
         if not results:
-                # Если данных нет, возвращаем нули
-                return {
-                "hands": {"total": 0, "utg":0, "mp":0, "co":0, "bu":0, "sb":0, "bb":0},
-                "pfr": {"total": "0.0", "utg":"0.0", "mp":"0.0", "co":"0.0", "bu":"0.0", "sb":"0.0", "bb":"0.0"},
-                "rfi": {"utg":"0.0", "mp":"0.0", "co":"0.0", "bu":"0.0", "sb":"0.0"}
-                }
+             return {} # Simplify empty return
 
         # Инициализация структур
         hands_data = {"total": 0, "utg":0, "mp":0, "co":0, "bu":0, "sb":0, "bb":0}
@@ -1401,6 +1530,7 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
         vpip_counts = {"total": 0, "utg":0, "mp":0, "co":0, "bu":0, "sb":0, "bb":0}
         rfi_counts = {"utg":0, "mp":0, "co":0, "bu":0, "sb":0}
         rfi_opps = {"utg":0, "mp":0, "co":0, "bu":0, "sb":0}
+        
         
         # New Steal Aggregators
         steal_att_total = 0
@@ -1415,14 +1545,29 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
         bb_limp_check_Total = 0
         bb_limp_iso_Total = 0
         
+        # WTSD/WSD Aggregators
+        wtsd_Total = 0
+        wsd_Total = 0
+        saw_flop_Total = 0
+        
+        # C-Bet & 3-Bet Aggregators
+        p3bet_Total = 0
+        p3bet_opp_Total = 0
+        cbet_Total = 0
+        cbet_opp_Total = 0
+        fcbet_Total = 0
+        fcbet_opp_Total = 0
+        
         total_hands_all = 0
         total_pfr_all = 0
         total_vpip_all = 0
 
         for row in results:
             # row: 0=hands, 1=pfr_sum, 2=vpip_sum, 3=position, 4=rfi_sum, 5=rfi_opp
-            # 6=facing_steal, 7=steal_fold, 8=steal_call, 9=steal_3bet, 10=steal_att, 11=steal_succ
-            # 12=facing_limp, 13=limp_check, 14=limp_iso
+            # 6=fc_steal, ... 11=steal_succ
+            # 12=fc_limp, 13=check_limp, 14=iso_limp
+            # 15=wtsd, 16=wsd, 17=saw_flop
+            
             cnt_hands = row[0]
             cnt_pfr = row[1]
             cnt_vpip = row[2]
@@ -1440,6 +1585,17 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
             cnt_facing_limp = row[12]
             cnt_check_limp = row[13]
             cnt_iso_limp = row[14]
+            
+            cnt_wtsd = row[15]
+            cnt_wsd = row[16]
+            cnt_saw_flop = row[17]
+            
+            cnt_p3bet = row[18]
+            cnt_p3bet_opp = row[19]
+            cnt_cbet = row[20]
+            cnt_cbet_opp = row[21]
+            cnt_fcbet = row[22]
+            cnt_fcbet_opp = row[23]
 
             # Агрегация по позициям
             if pos in hands_data:
@@ -1470,6 +1626,18 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
                 bb_facing_limp_Total += cnt_facing_limp
                 bb_limp_check_Total += cnt_check_limp
                 bb_limp_iso_Total += cnt_iso_limp
+                
+            wtsd_Total += cnt_wtsd
+            wsd_Total += cnt_wsd
+            saw_flop_Total += cnt_saw_flop
+            
+            p3bet_Total += cnt_p3bet
+            p3bet_opp_Total += cnt_p3bet_opp
+            cbet_Total += cnt_cbet
+            cbet_opp_Total += cnt_cbet_opp
+            fcbet_Total += cnt_fcbet
+            fcbet_opp_Total += cnt_fcbet_opp
+        
 
         hands_data["total"] = total_hands_all
         
@@ -1530,6 +1698,13 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
                 "check": bb_check_limp_pct,
                 "iso": bb_iso_limp_pct
             },
+            "wtsd": {
+                "wtsd": calc_pct(wtsd_Total, saw_flop_Total),
+                "wsd": calc_pct(wsd_Total, wtsd_Total)
+            },
+            "cbet": { "total": calc_pct(cbet_Total, cbet_opp_Total) },
+            "3bet": { "total": calc_pct(p3bet_Total, p3bet_opp_Total) },
+            "fold_to_cbet": { "total": calc_pct(fcbet_Total, fcbet_opp_Total) },
             "steal_success": steal_succ_pct
         }
         
