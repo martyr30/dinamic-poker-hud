@@ -163,6 +163,9 @@ def setup_database_table(table_segment: str):
                 cbet_opp INTEGER DEFAULT 0,
                 is_fold_to_cbet INTEGER DEFAULT 0,
                 fold_to_cbet_opp INTEGER DEFAULT 0,
+                
+                is_fold_to_3bet INTEGER DEFAULT 0,
+                fold_to_3bet_opp INTEGER DEFAULT 0,
 
                 PRIMARY KEY (hand_id, player_name)
             );
@@ -174,13 +177,14 @@ def setup_database_table(table_segment: str):
             "facing_bet_pct_pot", "opponent_position", "board_cards",
             "rfi_opportunity", "normalized_hand", "facing_limp", "is_limp_check", "is_limp_iso",
             "wtsd", "wsd",
-            "is_3bet", "is_3bet_opp", "is_cbet", "cbet_opp", "is_fold_to_cbet", "fold_to_cbet_opp"
+            "is_3bet", "is_3bet_opp", "is_cbet", "cbet_opp", "is_fold_to_cbet", "fold_to_cbet_opp",
+            "is_fold_to_3bet", "fold_to_3bet_opp"
         ]
         for col in log_columns_to_add:
             try:
                 col_type = "TEXT"
                 if "pct_pot" in col: col_type = "DECIMAL(5,2)"
-                elif any(x in col for x in ["rfi_opportunity", "is_limp", "facing_limp", "wtsd", "wsd", "is_3bet", "cbet", "fold_to_cbet", "opp"]): 
+                elif any(x in col for x in ["rfi_opportunity", "is_limp", "facing_limp", "wtsd", "wsd", "is_3bet", "cbet", "fold_to_cbet", "fold_to_3bet", "opp"]): 
                     col_type = "INTEGER DEFAULT 0"
                 
                 cursor.execute(f"ALTER TABLE my_hand_log ADD COLUMN {col} {col_type}")
@@ -593,8 +597,22 @@ def analyze_hand_for_stats(hand_history: HandHistory):
                         stats_update[player_name]['af_calls'] += 1
 
             # --- VPIP ---
-            if action_type_code in ('cc', 'cbr'):
+            if action_type_code == 'cbr':
                 stats_update[player_name]['vpip'] = True
+            elif action_type_code == 'cc':
+                # BB Check is not VPIP
+                player_pos_str = player_map.get(player_code)[1]
+                # state '0limp' or '0rfi' (if SB calls BB?) -> essentially unraised
+                # Simplified check: If BB and state is not raised (0bet/2bet/3bet)
+                # But '0bet' in this function seems to mean RFI made? (Line 521)
+                # Let's check state logic.
+                # Line 521: if cbr -> state=0bet. So 0bet IS raised.
+                # Line 542: if state in (0bet,...) and cbr -> 2bet.
+                # So unraised states are '0rfi' and '0limp'.
+                
+                is_bb_check = (player_pos_str == 'bb' and state in ('0rfi', '0limp'))
+                if not is_bb_check:
+                     stats_update[player_name]['vpip'] = True
 
     # --- WTSD & WSD ---
     # В конце раздачи active_players содержит тех, кто дошел до шоудауна (или выиграл без шоудауна, 
@@ -768,8 +786,11 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
 
     # 1.1 Preflop: Basic Actions, 3-Bet, Steal
     last_raiser = None # For C-Bet tracking
+    has_raised_preflop = False # Track for Fold to 3-Bet
     
     for action_str in hand_history.actions:
+
+
         parts = action_str.split()
         # print(parts[3])
 
@@ -843,6 +864,14 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
                          stats_update[analyze_player_name]['is_3bet_pre'] = 1
                      state = '2bet' # Upgrade state to 3-bet pot
 
+            # --- Fold to 3-Bet Logic ---
+            # If state is 2bet (someone 3-betted), and WE raised previously -> We are facing 3bet
+            if state_before_action == '2bet' and player_code == analyze_player_code:
+                 if has_raised_preflop:
+                      stats_update[analyze_player_name]['fold_to_3bet_opp'] = 1
+                      if action_type_code == 'f':
+                           stats_update[analyze_player_name]['is_fold_to_3bet'] = 1
+
             # Update Last Raiser (for C-Bet)
             if action_type_code == 'cbr':
                 last_raiser = player_name
@@ -898,11 +927,21 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
             # --- VPIP/PFR (Ваша логика) ---
             if player_code == analyze_player_code:
                 # cc (Call), rbr (Bet/Raise) - это VPIP
-                if action_type_code in ('cc', 'cbr'):
+                if action_type_code == 'cbr':
                     stats_update[analyze_player_name]['is_vpip'] = 1
+                elif action_type_code == 'cc':
+                    # Check for BB Check (Not VPIP)
+                    # If position is BB and pot is unraised (0limp), it's a Check.
+                    # Otherwise (Call), it IS VPIP.
+                    hero_pos = player_map.get(player_code)[1]
+                    is_bb_check = (hero_pos == 'bb' and state == '0limp')
+                    
+                    if not is_bb_check:
+                         stats_update[analyze_player_name]['is_vpip'] = 1
                 # rbr (Raise) - это PFR
                 if action_type_code in ('cbr'):
                     stats_update[analyze_player_name]['is_pfr'] = 1
+                    has_raised_preflop = True # Track for Fold to 3-Bet
         
 
     # 1.2 Подсчет инвестиций и выигрыша.
@@ -1150,7 +1189,9 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
             'cbet_flop_succ': data.get('cbet_flop_succ', 0),
             'cbet_flop_opp': data.get('cbet_flop_opp', 0),
             'fcbet_flop_succ': data.get('is_fold_to_cbet', 0), # Internal: is_fold_to_cbet
-            'fcbet_flop_opp': data.get('fold_to_cbet_opp', 0)  # Internal: fold_to_cbet_opp
+            'fcbet_flop_opp': data.get('fold_to_cbet_opp', 0),  # Internal: fold_to_cbet_opp
+            'is_fold_to_3bet': data.get('is_fold_to_3bet', 0), 
+            'fold_to_3bet_opp': data.get('fold_to_3bet_opp', 0)
         }
     
     # Calculate WTSD/WSD for Hero
@@ -1337,6 +1378,8 @@ def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
             cbet_opp = data.get('cbet_flop_opp', 0)
             is_fold_to_cbet = data.get('fcbet_flop_succ', 0)
             fold_to_cbet_opp = data.get('fcbet_flop_opp', 0)
+            is_fold_to_3bet = data.get('is_fold_to_3bet', 0)
+            fold_to_3bet_opp = data.get('fold_to_3bet_opp', 0)
             
             # Normalize Hand for Chart
             normalized_hand = normalize_cards(cards)
@@ -1352,8 +1395,9 @@ def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
                     facing_steal, is_steal_defend, is_steal_3bet, is_steal_fold, steal_success,
                     facing_limp, is_limp_check, is_limp_iso, normalized_hand,
                     wtsd, wsd,
-                    is_3bet, is_3bet_opp, is_cbet, cbet_opp, is_fold_to_cbet, fold_to_cbet_opp
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    is_3bet, is_3bet_opp, is_cbet, cbet_opp, is_fold_to_cbet, fold_to_cbet_opp,
+                    is_fold_to_3bet, fold_to_3bet_opp
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 hand_id, table_part_name, player_name, position, cards,
                 is_rfi, is_pfr, is_vpip, first_action, first_raiser_position,
@@ -1364,7 +1408,8 @@ def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
                 facing_steal, is_steal_defend, is_steal_3bet, is_steal_fold, steal_success,
                 facing_limp, is_limp_check, is_limp_iso, normalized_hand,
                 wtsd, wsd,
-                is_3bet, is_3bet_opp, is_cbet, cbet_opp, is_fold_to_cbet, fold_to_cbet_opp
+                is_3bet, is_3bet_opp, is_cbet, cbet_opp, is_fold_to_cbet, fold_to_cbet_opp,
+                is_fold_to_3bet, fold_to_3bet_opp
             ))
         conn.commit()
     except Exception as e:
@@ -1501,7 +1546,10 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
                 SUM(is_cbet) as cbet_sum,
                 SUM(cbet_opp) as cbet_opp_sum,
                 SUM(is_fold_to_cbet) as fcbet_sum,
-                SUM(fold_to_cbet_opp) as fcbet_opp_sum
+                SUM(fold_to_cbet_opp) as fcbet_opp_sum,
+                
+                SUM(is_fold_to_3bet) as f3bet_sum,
+                SUM(fold_to_3bet_opp) as f3bet_opp_sum
             
             FROM my_hand_log 
             WHERE player_name = ?
@@ -1557,6 +1605,8 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
         cbet_opp_Total = 0
         fcbet_Total = 0
         fcbet_opp_Total = 0
+        f3bet_Total = 0
+        f3bet_opp_Total = 0
         
         total_hands_all = 0
         total_pfr_all = 0
@@ -1596,6 +1646,8 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
             cnt_cbet_opp = row[21]
             cnt_fcbet = row[22]
             cnt_fcbet_opp = row[23]
+            cnt_f3bet = row[24] # New Index
+            cnt_f3bet_opp = row[25]
 
             # Агрегация по позициям
             if pos in hands_data:
@@ -1637,6 +1689,8 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
             cbet_opp_Total += cnt_cbet_opp
             fcbet_Total += cnt_fcbet
             fcbet_opp_Total += cnt_fcbet_opp
+            f3bet_Total += cnt_f3bet
+            f3bet_opp_Total += cnt_f3bet_opp
         
 
         hands_data["total"] = total_hands_all
@@ -1705,6 +1759,7 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
             "cbet": { "total": calc_pct(cbet_Total, cbet_opp_Total) },
             "3bet": { "total": calc_pct(p3bet_Total, p3bet_opp_Total) },
             "fold_to_cbet": { "total": calc_pct(fcbet_Total, fcbet_opp_Total) },
+            "fold_to_3bet": { "total": calc_pct(f3bet_Total, f3bet_opp_Total) },
             "steal_success": steal_succ_pct
         }
         
