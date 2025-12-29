@@ -4,10 +4,11 @@ from PySide6.QtWidgets import (
     QHeaderView, QDateEdit, QPushButton, QHBoxLayout, QCheckBox, QFrame
 )
 from PySide6.QtCore import Qt, QTimer, QDate, QPoint
-from PySide6.QtGui import QMouseEvent
+from PySide6.QtGui import QMouseEvent, QColor
 from datetime import datetime, time
-from poker_stats_db import get_player_extended_stats, get_chart_hands_data
+from poker_stats_db import get_player_extended_stats, get_chart_hands_data, get_player_hand_log_df
 from hand_matrix_widget import HandChartDialog
+from graph_widget import PokerGraphWidget
 
 class PersonalStatsWindow(QWidget):
     """
@@ -25,8 +26,7 @@ class PersonalStatsWindow(QWidget):
         self.offset = QPoint()
         # Настройка окна: всегда сверху, без рамки, темный фон
         self.setWindowFlags(
-            Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.FramelessWindowHint
+            Qt.WindowType.WindowStaysOnTopHint
         )
         self.setStyleSheet("background-color: rgb(50, 50, 50); border-radius: 8px; color: white;")
 
@@ -100,6 +100,14 @@ class PersonalStatsWindow(QWidget):
         self.btn_refresh.clicked.connect(self.refresh_stats)
         filter_layout.addWidget(self.btn_refresh)
         
+        # Кнопка GRAPH
+        self.btn_graph = QPushButton("📈")
+        self.btn_graph.setToolTip("Show Graph")
+        self.btn_graph.setFixedWidth(30)
+        self.btn_graph.setStyleSheet("background-color: #444; color: white; border: 1px solid #666;")
+        self.btn_graph.clicked.connect(self.open_graph)
+        filter_layout.addWidget(self.btn_graph)
+        
         filter_layout.addStretch()
         # self.main_layout.addLayout(filter_layout) # Moved to filter_frame
         filter_box_layout.addLayout(filter_layout)
@@ -108,12 +116,12 @@ class PersonalStatsWindow(QWidget):
         # 3. ТАБЛИЦА СТАТИСТИКИ
         # 4 строки: Рук, VPIP, PFR, RFI
         # 6 колонок: Total, UTG, MP, CO, BU, SB
-        self.stats_table = QTableWidget(4, 6) 
+        self.stats_table = QTableWidget(8, 7) 
         
         self.stats_table.setHorizontalHeaderLabels([
-            "TOTAL", "UTG", "MP", "CO", "BU", "SB"
+            "TOTAL", "UTG", "MP", "CO", "BU", "SB", "BB"
         ])
-        self.stats_table.setVerticalHeaderLabels(["Hands", "VPIP %", "PFR %", "RFI %"])
+        self.stats_table.setVerticalHeaderLabels(["Hands", "VPIP %", "PFR %", "RFI %", "Net BB/100", "WSD BB/100", "WNSD BB/100", "EV BB/100"])
         self.stats_table.cellClicked.connect(self.on_table_cell_clicked)
 
         # Стилизация таблицы
@@ -135,7 +143,7 @@ class PersonalStatsWindow(QWidget):
         self.stats_table.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         
         # Растягиваем колонки
-        self.stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.stats_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.stats_table.verticalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
 
         self.main_layout.addWidget(self.stats_table)
@@ -220,6 +228,7 @@ class PersonalStatsWindow(QWidget):
         self.show()
         # Даем интерфейсу время на отрисовку перед обновлением данных
         QTimer.singleShot(100, self.refresh_stats)
+        self.toggle_mode() # Default to Mini Mode
 
     def _toggle_date_to(self, state):
         self.date_to.setEnabled(self.check_to.isChecked())
@@ -284,40 +293,76 @@ class PersonalStatsWindow(QWidget):
     def update_stats_table(self, stats: Dict[str, Dict[str, Any]]):
         """Заполняет таблицу данными."""
         self.current_stats = stats # Save for mini mode
-        positions = ["total", "utg", "mp", "co", "bu", "sb"]
+        
+        # Update Mini Label dynamically
+        if self.is_mini_mode:
+             hands = stats.get('hands', {}).get('total', 0)
+             vpip = stats.get('vpip', {}).get('total', '-')
+             pfr = stats.get('pfr', {}).get('total', '-')
+             self.mini_stats_label.setText(f"Hands: {hands} | VPIP: {vpip}% | PFR: {pfr}%")
+        
+        positions = ["total", "utg", "mp", "co", "bu", "sb", "bb"]
         
         hands_data = stats.get('hands', {})
         vpip_data = stats.get('vpip', {})
         pfr_data = stats.get('pfr', {})
         rfi_data = stats.get('rfi', {})
+        
+        bb_won_data = stats.get('bb_won', {})
+        wsd_bb_data = stats.get('wsd_bb', {})
+        wnsd_bb_data = stats.get('wnsd_bb', {})
+        ev_data = stats.get('ev', {})
 
         # Вспомогательная функция для установки ячейки
-        def set_cell(row, col, value):
-            item = QTableWidgetItem(str(value))
+        def set_cell(row, col, value, count_hands=0, is_bb100=False, color=None):
+            text_val = str(value)
+            
+            if is_bb100:
+                if count_hands > 0:
+                     bb100 = (float(value) / count_hands) * 100
+                else:
+                     bb100 = 0.0
+                text_val = f"{bb100:+.2f}"
+                if bb100 > 0: color = QColor("#00FF00")
+                elif bb100 < 0: color = QColor("#FF0000")
+            elif isinstance(value, float):
+                 text_val = f"{value:.2f}"
+            
+            item = QTableWidgetItem(text_val)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if color:
+                item.setForeground(color)
             self.stats_table.setItem(row, col, item)
 
         for col_idx, pos in enumerate(positions):
+            cnt_hands = hands_data.get(pos, 0)
+            
             # Row 0: Hands
-            set_cell(0, col_idx, hands_data.get(pos, 0))
+            set_cell(0, col_idx, cnt_hands)
             # Row 1: VPIP
             set_cell(1, col_idx, vpip_data.get(pos, "0.0"))
             # Row 2: PFR
             set_cell(2, col_idx, pfr_data.get(pos, "0.0"))
+            # Row 4: Net Won BB/100
+            set_cell(4, col_idx, bb_won_data.get(pos, 0.0), cnt_hands, True)
+            # Row 5: WSD BB/100
+            set_cell(5, col_idx, wsd_bb_data.get(pos, 0.0), cnt_hands, True)
+            # Row 6: WNSD BB/100
+            set_cell(6, col_idx, wnsd_bb_data.get(pos, 0.0), cnt_hands, True)
+            # Row 7: EV BB/100
+            set_cell(7, col_idx, ev_data.get(pos, 0.0), cnt_hands, True)
 
-        # Row 3: RFI (нет Total для RFI обычно, но если есть - выведем)
-        # RFI data: utg, mp, co, bu, sb
+        # Row 3: RFI
         rfi_positions = ["utg", "mp", "co", "bu", "sb"]
-        set_cell(3, 0, "-") # Total RFI often N/A or avg
+        set_cell(3, 0, "-") 
         
         for i, pos in enumerate(rfi_positions):
-             # RFI start from col 1 (UTG)
              set_cell(3, i+1, rfi_data.get(pos, "0.0"))
+        
+        # BB RFI
+        set_cell(3, 6, "-")
 
         # --- Update Blind Defense Stats ---
-        steal_succ = stats.get('steal_success', '-')
-        bb_def = stats.get('bb_defense', {})
-              # BB Defense Stats
         bb_def = stats.get('bb_defense', {})
         self.lbl_bb_fold.setText(f"<b>BB Fold to Steal:</b> {bb_def.get('fold_to_steal', '-')}%")
         self.lbl_bb_call.setText(f"<b>BB Call vs Steal:</b> {bb_def.get('call_steal', '-')}%")
@@ -357,15 +402,23 @@ class PersonalStatsWindow(QWidget):
         self.stats_table.resizeColumnsToContents()
         self.stats_table.resizeRowsToContents()
         
-        # Вычисляем высоту
+        # Calculate full table width
+        v_header_w = self.stats_table.verticalHeader().width()
+        cols_w = sum(self.stats_table.columnWidth(i) for i in range(self.stats_table.columnCount()))
+        table_content_w = v_header_w + cols_w + 10 # + small buffer
+        
+        # Force table min width so layout respects it
+        self.stats_table.setMinimumWidth(table_content_w)
+        
+        # Calculate height
         h_header_h = self.stats_table.horizontalHeader().height()
         rows_h = sum(self.stats_table.rowHeight(i) for i in range(self.stats_table.rowCount()))
-        total_table_h = h_header_h + rows_h + 10
-        
-        # Высота контролов и заголовка
-        # Можно использовать sizeHint, но мы дали Layout работать
-        # Просто используем adjustSize() Qt, он сам посчитает
-        self.adjustSize() 
+        # Set Min Height for table too
+        self.stats_table.setMinimumHeight(h_header_h + rows_h + 5)
+
+        # Trigger layout update
+        self.adjustSize()
+ 
 
     # --- DRAG & DROP UTILS ---
     def mousePressEvent(self, event: QMouseEvent):
@@ -387,7 +440,7 @@ class PersonalStatsWindow(QWidget):
     def on_table_cell_clicked(self, row, col):
         """Обработка клика по ячейке статистики для показа чарта."""
         stat_types = ['hands', 'vpip', 'pfr', 'rfi']
-        positions = ['total', 'utg', 'mp', 'co', 'bu', 'sb']
+        positions = ['total', 'utg', 'mp', 'co', 'bu', 'sb', 'bb']
         
         if row >= len(stat_types) or col >= len(positions):
             return
@@ -403,7 +456,7 @@ class PersonalStatsWindow(QWidget):
              qdate_to = self.date_to.date()
              dt_to = datetime.combine(qdate_to.toPython(), time.max)
         
-        print(f"Fetching Chart: {stat_type} {position}")
+
         data = get_chart_hands_data(
             self.target_player, 
             stat_type, 
@@ -413,8 +466,45 @@ class PersonalStatsWindow(QWidget):
         )
         
         if not data:
-            print("No data for chart.")
-             # return
+            return
             
         dlg = HandChartDialog(f"Hands: {stat_type.upper()} @ {position.upper()}", data)
         dlg.exec()
+
+    def open_graph(self):
+        """Opens the graph widget in a separate window."""
+        try:
+            # 1. Determine Date Range
+            qdate_from = self.date_from.date()
+            dt_from = datetime.combine(qdate_from.toPython(), time.min)
+            dt_to = None
+            if self.check_to.isChecked():
+                qdate_to = self.date_to.date()
+                dt_to = datetime.combine(qdate_to.toPython(), time.max)
+            
+            # 2. Fetch Data
+            df = get_player_hand_log_df(self.target_player, min_time=dt_from, max_time=dt_to)
+            
+            if df.empty:
+
+                return
+
+            # 3. Open Window
+            # Use 'self' as parent? better creating a Dialog or independent widget.
+            # Independent widget is better for resizing.
+            
+            # Keep reference to avoid garbage collection
+            self._graph_window = QWidget()
+            self._graph_window.setWindowTitle(f"Graph: {self.target_player}")
+            self._graph_window.resize(900, 600)
+            layout = QVBoxLayout(self._graph_window)
+            
+            graph_widget = PokerGraphWidget()
+            layout.addWidget(graph_widget)
+            
+            graph_widget.plot_data(df)
+            
+            self._graph_window.show()
+            
+        except Exception as e:
+            print(f"Error opening graph: {e}")

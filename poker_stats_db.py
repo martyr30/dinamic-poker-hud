@@ -10,6 +10,7 @@ from pokerkit import HandHistory
 # Добавляем импорт для генерации имени таблицы
 from poker_globals import DB_NAME, ACTION_POSITIONS, ALL_STATS_FIELDS, get_table_name_segment
 from pokerkit.utilities import Card, Rank
+import pandas as pd
 
 # --- КОНСТАНТЫ ---
 DB_NAME = 'poker_stats.db'
@@ -137,6 +138,7 @@ def setup_database_table(table_segment: str):
                 opponent_position TEXT,
                 board_cards TEXT,
                 rfi_opportunity INTEGER DEFAULT 0,
+                bb_size DECIMAL(10,2) DEFAULT 0,
                 
                 -- Новые колонки для защиты BB и стилов
                 facing_steal INTEGER DEFAULT 0,  -- 1, если игрок на BB/SB и получил опен-рейз с CO/BU/SB
@@ -200,6 +202,11 @@ def setup_database_table(table_segment: str):
             cursor.execute(f"ALTER TABLE my_hand_log ADD COLUMN rfi_opportunity INTEGER DEFAULT 0")
         except sqlite3.OperationalError:
             pass
+
+        try:
+             cursor.execute(f"ALTER TABLE my_hand_log ADD COLUMN bb_size DECIMAL(10,2) DEFAULT 0")
+        except sqlite3.OperationalError:
+             pass
 
         # Migration for BB Defense Stats (Step 5)
         new_cols = [
@@ -679,12 +686,12 @@ def analyze_hand_for_stats(hand_history: HandHistory):
             'af_bets_raises': data['af_bets_raises'],
             'af_calls': data['af_calls']
         }
-    # print("ALL players stats:")
-    # print(final_stats)
+
     return final_stats
 
 # --- 2.2 ФУНКЦИЯ АНАЛИЗА РАЗДАЧИ ИГРОКА ---
-def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
+# --- 2.2 ФУНКЦИЯ АНАЛИЗА РАЗДАЧИ ИГРОКА ---
+def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str, known_bb_size: float = 0.0):
     stats_update = {}
     player_map = {}
     all_players = [p for p in hand_history.players]
@@ -703,7 +710,7 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
         player_code = f'p{i + 1}'
         player_position = determine_position( i+1, len(all_players) )
         player_map[player_code] = [player_name, player_position]
-        # print(player_map[player_code])
+
         if player_name == analyze_player_name:
             analyze_player_code = f'p{i + 1}'
             stats_update[player_name] = {
@@ -733,7 +740,6 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
                 # New BB Defense & Steal stats
                 'facing_steal': 0,
                 'is_steal_defend': 0,
-                'is_steal_defend': 0,
                 'is_steal_3bet': 0,
                 'is_steal_fold': 0,
                 'steal_success': 0,
@@ -743,8 +749,10 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
                 'cbet_flop_succ': 0,
                 'cbet_flop_opp': 0,
                 'is_fold_to_cbet': 0, # fcbet_flop_succ
-                'fold_to_cbet_opp': 0  # fcbet_flop_opp
+                'fold_to_cbet_opp': 0,  # fcbet_flop_opp
+                'bb_size': 0.0
             }
+
 
             # 1. ВРЕМЯ РАЗДАЧИ
             try:
@@ -765,6 +773,26 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
                          stats_update[player_name]['time_logged'] = datetime.datetime(hh_date.year, hh_date.month, hh_date.day)
             except Exception:
                 pass
+            
+            # 1.1 BB SIZE EXTRACTION
+
+            # Priority 1: explicitly passed known_bb_size
+            if known_bb_size > 0:
+                 stats_update[player_name]['bb_size'] = float(known_bb_size)
+            # Priority 2: min_bet from HandHistory (usually BB in NLHE)
+            elif getattr(hand_history, 'min_bet', None):
+                 stats_update[player_name]['bb_size'] = float(hand_history.min_bet)
+            # Priority 3: Extract from blinds list (fallback)
+            elif hh_blinds:
+                active_blinds = [float(b) for b in hh_blinds if b and float(b) > 0]
+                if active_blinds:
+                    stats_update[player_name]['bb_size'] = max(active_blinds)
+                else:
+                    if len(hh_blinds) >= 2:
+                         val = float(hh_blinds[1]) if hh_blinds[1] else 0.0
+                         stats_update[player_name]['bb_size'] = val if val > 0 else 0.0
+                    elif len(hh_blinds) == 1:
+                         stats_update[player_name]['bb_size'] = float(hh_blinds[0])
 
             
             # --- ОТЛАДОЧНЫЙ БЛОК ДЛЯ ПОИСКА ОШИБКИ ---
@@ -792,7 +820,7 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
 
 
         parts = action_str.split()
-        # print(parts[3])
+
 
         if parts[1] in ('db', 'sm'): # Конец префлопа
             break
@@ -1191,7 +1219,8 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str):
             'fcbet_flop_succ': data.get('is_fold_to_cbet', 0), # Internal: is_fold_to_cbet
             'fcbet_flop_opp': data.get('fold_to_cbet_opp', 0),  # Internal: fold_to_cbet_opp
             'is_fold_to_3bet': data.get('is_fold_to_3bet', 0), 
-            'fold_to_3bet_opp': data.get('fold_to_3bet_opp', 0)
+            'fold_to_3bet_opp': data.get('fold_to_3bet_opp', 0),
+            'bb_size': data.get('bb_size', 0.0)
         }
     
     # Calculate WTSD/WSD for Hero
@@ -1257,10 +1286,7 @@ def update_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]], table_segment
             wtsd = 1 if data.get('wtsd', False) else 0
             wsd = 1 if data.get('wsd', False) else 0
 
-            # print('INSERT')
-            # print(player_name)
-            # print(is_vpip)
-            # print(is_pfr)
+
 
             cursor.execute(f"""
                 INSERT INTO {safe_table_name}
@@ -1396,8 +1422,9 @@ def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
                     facing_limp, is_limp_check, is_limp_iso, normalized_hand,
                     wtsd, wsd,
                     is_3bet, is_3bet_opp, is_cbet, cbet_opp, is_fold_to_cbet, fold_to_cbet_opp,
-                    is_fold_to_3bet, fold_to_3bet_opp
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    is_fold_to_3bet, fold_to_3bet_opp,
+                    bb_size
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 hand_id, table_part_name, player_name, position, cards,
                 is_rfi, is_pfr, is_vpip, first_action, first_raiser_position,
@@ -1409,7 +1436,8 @@ def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
                 facing_limp, is_limp_check, is_limp_iso, normalized_hand,
                 wtsd, wsd,
                 is_3bet, is_3bet_opp, is_cbet, cbet_opp, is_fold_to_cbet, fold_to_cbet_opp,
-                is_fold_to_3bet, fold_to_3bet_opp
+                is_fold_to_3bet, fold_to_3bet_opp,
+                data.get('bb_size', 0.0)
             ))
         conn.commit()
     except Exception as e:
@@ -1549,7 +1577,14 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
                 SUM(fold_to_cbet_opp) as fcbet_opp_sum,
                 
                 SUM(is_fold_to_3bet) as f3bet_sum,
-                SUM(fold_to_3bet_opp) as f3bet_opp_sum
+                SUM(fold_to_3bet_opp) as f3bet_opp_sum,
+                SUM(net_profit) as net_won_sum,
+                SUM(CASE WHEN wtsd > 0 THEN net_profit ELSE 0 END) as wsd_profit_sum,
+                SUM(CASE WHEN wtsd = 0 OR wtsd IS NULL THEN net_profit ELSE 0 END) as wnsd_profit_sum,
+                0 as ev_sum,
+                SUM(CASE WHEN bb_size > 0 THEN net_profit / bb_size ELSE 0 END) as bb_won_sum,
+                SUM(CASE WHEN wtsd > 0 AND bb_size > 0 THEN net_profit / bb_size ELSE 0 END) as wsd_bb_sum,
+                SUM(CASE WHEN (wtsd = 0 OR wtsd IS NULL) AND bb_size > 0 THEN net_profit / bb_size ELSE 0 END) as wnsd_bb_sum
             
             FROM my_hand_log 
             WHERE player_name = ?
@@ -1578,6 +1613,14 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
         vpip_counts = {"total": 0, "utg":0, "mp":0, "co":0, "bu":0, "sb":0, "bb":0}
         rfi_counts = {"utg":0, "mp":0, "co":0, "bu":0, "sb":0}
         rfi_opps = {"utg":0, "mp":0, "co":0, "bu":0, "sb":0}
+        
+        net_won_data = {"total": 0.0, "utg": 0.0, "mp": 0.0, "co": 0.0, "bu": 0.0, "sb": 0.0, "bb": 0.0}
+        wsd_profit_data = {"total": 0.0, "utg": 0.0, "mp": 0.0, "co": 0.0, "bu": 0.0, "sb": 0.0, "bb": 0.0}
+        wnsd_profit_data = {"total": 0.0, "utg": 0.0, "mp": 0.0, "co": 0.0, "bu": 0.0, "sb": 0.0, "bb": 0.0}
+        ev_data = {"total": 0.0, "utg": 0.0, "mp": 0.0, "co": 0.0, "bu": 0.0, "sb": 0.0, "bb": 0.0}
+        bb_won_data = {"total": 0.0, "utg": 0.0, "mp": 0.0, "co": 0.0, "bu": 0.0, "sb": 0.0, "bb": 0.0}
+        wsd_bb_data = {"total": 0.0, "utg": 0.0, "mp": 0.0, "co": 0.0, "bu": 0.0, "sb": 0.0, "bb": 0.0}
+        wnsd_bb_data = {"total": 0.0, "utg": 0.0, "mp": 0.0, "co": 0.0, "bu": 0.0, "sb": 0.0, "bb": 0.0}
         
         
         # New Steal Aggregators
@@ -1648,6 +1691,13 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
             cnt_fcbet_opp = row[23]
             cnt_f3bet = row[24] # New Index
             cnt_f3bet_opp = row[25]
+            net_won_val = float(row[26]) if row[26] else 0.0
+            wsd_profit_val = float(row[27]) if row[27] else 0.0
+            wnsd_profit_val = float(row[28]) if row[28] else 0.0
+            ev_val = float(row[29]) if row[29] else 0.0
+            bb_won_val = float(row[30]) if row[30] else 0.0
+            wsd_bb_val = float(row[31]) if row[31] else 0.0
+            wnsd_bb_val = float(row[32]) if row[32] else 0.0
 
             # Агрегация по позициям
             if pos in hands_data:
@@ -1691,6 +1741,24 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
             fcbet_opp_Total += cnt_fcbet_opp
             f3bet_Total += cnt_f3bet
             f3bet_opp_Total += cnt_f3bet_opp
+            
+            # Aggregate Profit
+            if pos in net_won_data:
+                net_won_data[pos] += net_won_val
+                wsd_profit_data[pos] += wsd_profit_val
+                wnsd_profit_data[pos] += wnsd_profit_val
+                ev_data[pos] += ev_val
+                bb_won_data[pos] += bb_won_val
+                wsd_bb_data[pos] += wsd_bb_val
+                wnsd_bb_data[pos] += wnsd_bb_val
+            
+            net_won_data["total"] += net_won_val
+            wsd_profit_data["total"] += wsd_profit_val
+            wnsd_profit_data["total"] += wnsd_profit_val
+            ev_data["total"] += ev_val
+            bb_won_data["total"] += bb_won_val
+            wsd_bb_data["total"] += wsd_bb_val
+            wnsd_bb_data["total"] += wnsd_bb_val
         
 
         hands_data["total"] = total_hands_all
@@ -1760,6 +1828,13 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
             "3bet": { "total": calc_pct(p3bet_Total, p3bet_opp_Total) },
             "fold_to_cbet": { "total": calc_pct(fcbet_Total, fcbet_opp_Total) },
             "fold_to_3bet": { "total": calc_pct(f3bet_Total, f3bet_opp_Total) },
+            "net_won": net_won_data,
+            "wsd_profit": wsd_profit_data,
+            "wnsd_profit": wnsd_profit_data,
+            "ev": ev_data,
+            "bb_won": bb_won_data,
+            "wsd_bb": wsd_bb_data,
+            "wnsd_bb": wnsd_bb_data,
             "steal_success": steal_succ_pct
         }
         
@@ -1821,3 +1896,84 @@ def get_chart_hands_data(player_name: str, stat_type: str, position: str, min_ti
         if conn: conn.close()
         
     return data
+
+def get_player_hand_log_df(player_name: str, min_time: Optional[datetime.datetime] = None, max_time: Optional[datetime.datetime] = None) -> pd.DataFrame:
+    """
+    Возвращает DataFrame с историей раздач игрока для построения графика.
+    Колонки: net_profit (-> net_won), wtsd, ev_adjusted (если есть).
+    Также рассчитывает bb_won на основе имени стола (NL2_...)
+    """
+    import pandas as pd
+    import re
+    
+    try:
+        conn = sqlite3.connect(DB_NAME)
+        
+        # Строим запрос
+        query = "SELECT * FROM my_hand_log WHERE player_name = ?"
+        params = [player_name]
+        
+        if min_time:
+            query += " AND time_logged >= ?"
+            params.append(min_time)
+        if max_time:
+            query += " AND time_logged <= ?"
+            params.append(max_time)
+            
+        query += " ORDER BY time_logged ASC"
+        
+        # Используем pandas read_sql
+        df = pd.read_sql_query(query, conn, params=params, parse_dates=['time_logged'])
+        
+        # Пост-обработка
+        if 'net_profit' in df.columns:
+            df['net_won'] = df['net_profit'] # Alias for graph
+            
+        # --- Calculating BB Won ---
+        # Helper to extract from regex
+        def extract_bb_from_name(table_name):
+            try:
+                # Ищем NL<digits>
+                match = re.search(r'NL(\d+)', str(table_name))
+                if match:
+                    cents = int(match.group(1))
+                    return cents / 100.0
+                return 1.0 # Default
+            except Exception:
+                return 1.0
+
+        # Calculate BB Size for each row
+        # 1. If bb_size > 0, use it.
+        # 2. Else parse table_part_name.
+        # 3. Else 1.0
+        
+        # We can use apply
+        def resolve_bb_size(row):
+            size = row.get('bb_size', 0.0)
+            if size and float(size) > 0:
+                return float(size)
+            
+            # Fallback
+            return extract_bb_from_name(row.get('table_part_name', ''))
+
+        if not df.empty and 'net_won' in df.columns:
+             # Calculate effective bb_size column
+             df['effective_bb_size'] = df.apply(resolve_bb_size, axis=1)
+             
+             # Avoid division by zero (should be 1.0 from fallback, but safety first)
+             df['effective_bb_size'] = df['effective_bb_size'].replace(0, 1.0)
+             
+             df['bb_won'] = df['net_won'] / df['effective_bb_size']
+             
+             # For EV adjusted (if needed)
+             if 'ev_adjusted' in df.columns:
+                 df['ev_adjusted_bb'] = df['ev_adjusted'] / df['effective_bb_size']
+
+        return df
+        
+    except Exception as e:
+        print(f"Stats DF Error: {e}")
+        # traceback.print_exc()
+        return pd.DataFrame() # Empty DF on error
+    finally:
+        if conn: conn.close()
