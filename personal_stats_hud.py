@@ -155,56 +155,63 @@ class PersonalStatsWindow(QWidget):
             lbl.setStyleSheet("color: #ccc; font-size: 12px;")
             return lbl
 
-        self.lbl_steal_succ = create_stat_label("Steal Success: -")
-        self.lbl_bb_fold = create_stat_label("BB Fold to Steal: -")
-        self.lbl_bb_call = create_stat_label("BB Call vs Steal: -")
-        self.lbl_bb_3bet = create_stat_label("BB 3Bet vs Steal: -")
-        self.lbl_bb_check_limp = create_stat_label("BB Check vs Limp: -")
-        self.lbl_bb_iso_limp = create_stat_label("BB Iso vs Limp: -")
+        self.lbl_steal_succ = create_stat_label("<b>Steal Success:</b> -")
+        self.lbl_bb_fold = create_stat_label("<b>BB Fold to Steal:</b> -")
+        self.lbl_bb_call = create_stat_label("<b>BB Call vs Steal:</b> -")
+        self.lbl_bb_3bet = create_stat_label("<b>BB 3Bet vs Steal:</b> -")
+        self.lbl_bb_check_limp = create_stat_label("<b>BB Check vs Limp:</b> -")
+        self.lbl_bb_iso_limp = create_stat_label("<b>BB Iso vs Limp:</b> -")
         
         # New Aggression Labels
-        self.lbl_3bet = create_stat_label("3-Bet: -")
-        self.lbl_cbet = create_stat_label("C-Bet: -")
-        self.lbl_fold_to_cbet = create_stat_label("Fold to C-Bet: -")
+        self.lbl_3bet = create_stat_label("<b>3-Bet:</b> -")
+        self.lbl_cbet = create_stat_label("<b>C-Bet:</b> -")
+        self.lbl_fold_to_cbet = create_stat_label("<b>Fold to C-Bet:</b> -")
+        self.lbl_fold_to_3bet = create_stat_label("<b>Fold to 3-Bet:</b> -")
         
-        self.lbl_wtsd = create_stat_label("WTSD: -")
-        self.lbl_wsd = create_stat_label("WSD: -")
+        self.lbl_wtsd = create_stat_label("<b>WTSD:</b> -")
+        self.lbl_wsd = create_stat_label("<b>WSD:</b> -")
 
-        # Row 1: Steal Success
-        row1 = QHBoxLayout()
-        row1.addWidget(self.lbl_steal_succ)
-        row1.addStretch()
-        defense_main_layout.addLayout(row1)
+        # Row 1 (Preflop Agg): 3-Bet, Fold to 3-Bet
+        row_pre_agg = QHBoxLayout()
+        row_pre_agg.addWidget(self.lbl_3bet)
+        row_pre_agg.addWidget(self.lbl_fold_to_3bet)
+        row_pre_agg.addStretch()
+        defense_main_layout.addLayout(row_pre_agg)
 
-        # Row 2: BB vs Steal (Fold, Call, 3Bet)
-        row2 = QHBoxLayout()
-        row2.addWidget(self.lbl_bb_fold)
-        row2.addWidget(self.lbl_bb_call)
-        row2.addWidget(self.lbl_bb_3bet)
-        row2.addStretch()
-        defense_main_layout.addLayout(row2)
+        # Row 2 (Steal Success)
+        row_steal_succ = QHBoxLayout()
+        row_steal_succ.addWidget(self.lbl_steal_succ)
+        row_steal_succ.addStretch()
+        defense_main_layout.addLayout(row_steal_succ)
+
+        # Row 3 (BB vs Steal)
+        row_bb_steal = QHBoxLayout()
+        row_bb_steal.addWidget(self.lbl_bb_fold)
+        row_bb_steal.addWidget(self.lbl_bb_call)
+        row_bb_steal.addWidget(self.lbl_bb_3bet)
+        row_bb_steal.addStretch()
+        defense_main_layout.addLayout(row_bb_steal)
         
-        # Row 3: BB vs Limp
-        row3 = QHBoxLayout()
-        row3.addWidget(self.lbl_bb_check_limp)
-        row3.addWidget(self.lbl_bb_iso_limp)
-        row3.addStretch()
-        defense_main_layout.addLayout(row3)
+        # Row 4 (BB vs Limp)
+        row_bb_limp = QHBoxLayout()
+        row_bb_limp.addWidget(self.lbl_bb_check_limp)
+        row_bb_limp.addWidget(self.lbl_bb_iso_limp)
+        row_bb_limp.addStretch()
+        defense_main_layout.addLayout(row_bb_limp)
         
-        # Row 3.5: Aggression (3-Bet, C-Bet, FcBet)
-        row_agg = QHBoxLayout()
-        row_agg.addWidget(self.lbl_3bet)
-        row_agg.addWidget(self.lbl_cbet)
-        row_agg.addWidget(self.lbl_fold_to_cbet)
-        row_agg.addStretch()
-        defense_main_layout.addLayout(row_agg)
+        # Row 5 (Postflop Agg: C-Bet, Fold to C-Bet)
+        row_post_agg = QHBoxLayout()
+        row_post_agg.addWidget(self.lbl_cbet)
+        row_post_agg.addWidget(self.lbl_fold_to_cbet)
+        row_post_agg.addStretch()
+        defense_main_layout.addLayout(row_post_agg)
         
-        # Row 4: WTSD / WSD
-        row4 = QHBoxLayout()
-        row4.addWidget(self.lbl_wtsd)
-        row4.addWidget(self.lbl_wsd)
-        row4.addStretch()
-        defense_main_layout.addLayout(row4)
+        # Row 6: WTSD / WSD
+        row_wtsd = QHBoxLayout()
+        row_wtsd.addWidget(self.lbl_wtsd)
+        row_wtsd.addWidget(self.lbl_wsd)
+        row_wtsd.addStretch()
+        defense_main_layout.addLayout(row_wtsd)
         
         self.main_layout.addWidget(self.defense_group)
 
@@ -312,32 +319,35 @@ class PersonalStatsWindow(QWidget):
         bb_def = stats.get('bb_defense', {})
               # BB Defense Stats
         bb_def = stats.get('bb_defense', {})
-        self.lbl_bb_fold.setText(f"BB Fold to Steal: {bb_def.get('fold_to_steal', '-')}%")
-        self.lbl_bb_call.setText(f"BB Call vs Steal: {bb_def.get('call_steal', '-')}%")
-        self.lbl_bb_3bet.setText(f"BB 3Bet vs Steal: {bb_def.get('3bet_steal', '-')}%")
+        self.lbl_bb_fold.setText(f"<b>BB Fold to Steal:</b> {bb_def.get('fold_to_steal', '-')}%")
+        self.lbl_bb_call.setText(f"<b>BB Call vs Steal:</b> {bb_def.get('call_steal', '-')}%")
+        self.lbl_bb_3bet.setText(f"<b>BB 3Bet vs Steal:</b> {bb_def.get('3bet_steal', '-')}%")
         
         # Steal Success
         steal_succ = stats.get('steal_success', '-')
-        self.lbl_steal_succ.setText(f"Steal Success: {steal_succ}%")
+        self.lbl_steal_succ.setText(f"<b>Steal Success:</b> {steal_succ}%")
         
         # BB vs Limp Stats
         bb_limp = stats.get('bb_vs_limp', {})
-        self.lbl_bb_check_limp.setText(f"BB Check vs Limp: {bb_limp.get('check', '-')}%")
-        self.lbl_bb_iso_limp.setText(f"BB Iso vs Limp: {bb_limp.get('iso', '-')}%")
+        self.lbl_bb_check_limp.setText(f"<b>BB Check vs Limp:</b> {bb_limp.get('check', '-')}%")
+        self.lbl_bb_iso_limp.setText(f"<b>BB Iso vs Limp:</b> {bb_limp.get('iso', '-')}%")
         
         # Aggression Stats
         t3bet = stats.get('3bet', {}).get('total', '-')
         cbet = stats.get('cbet', {}).get('total', '-')
         fcbet = stats.get('fold_to_cbet', {}).get('total', '-')
         
-        self.lbl_3bet.setText(f"3-Bet: {t3bet}%")
-        self.lbl_cbet.setText(f"C-Bet: {cbet}%")
-        self.lbl_fold_to_cbet.setText(f"Fold to C-Bet: {fcbet}%")
+        self.lbl_3bet.setText(f"<b>3-Bet:</b> {t3bet}%")
+        self.lbl_cbet.setText(f"<b>C-Bet:</b> {cbet}%")
+        self.lbl_fold_to_cbet.setText(f"<b>Fold to C-Bet:</b> {fcbet}%")
+        
+        f3bet = stats.get('fold_to_3bet', {}).get('total', '-')
+        self.lbl_fold_to_3bet.setText(f"<b>Fold to 3-Bet:</b> {f3bet}%")
         
         # WTSD/WSD
         wtsd_data = stats.get('wtsd', {})
-        self.lbl_wtsd.setText(f"WTSD: {wtsd_data.get('wtsd', '-')}%")
-        self.lbl_wsd.setText(f"WSD: {wtsd_data.get('wsd', '-')}%")
+        self.lbl_wtsd.setText(f"<b>WTSD:</b> {wtsd_data.get('wtsd', '-')}%")
+        self.lbl_wsd.setText(f"<b>WSD:</b> {wtsd_data.get('wsd', '-')}%")
 
         self.stats_table.viewport().update()
         self.adjust_window_size()
