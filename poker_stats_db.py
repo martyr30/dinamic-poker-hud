@@ -7,13 +7,99 @@ import sys
 from typing import Dict, Any, List, Optional
 from decimal import Decimal
 from pokerkit import HandHistory
+from pokerkit import StandardHighHand, Deck, Card
+import random
+from itertools import combinations
+
+def calculate_equity_monte_carlo(hero_hole, villain_holes, board, full_deck_list, sample_count=1000):
+    """
+    Calculates equity for Hero vs Villains using Monte Carlo simulation.
+    """
+    # 1. Filter Deck (Remove known cards)
+    # DEBUG: Inspect inputs
+    # print(f"DEBUG EV: HeroHole={hero_hole} Type={type(hero_hole)}")
+    # if len(hero_hole) > 0: print(f"DEBUG EV: HeroHole[0]={hero_hole[0]} Type={type(hero_hole[0])}")
+    
+    try:
+        # Robust filtering: Use string representation (Rank+Suit) to ensure no duplicates
+        # even if Card objects have different identities.
+        known_card_strs = {str(c) for c in (hero_hole + board)}
+        for v_hole in villain_holes:
+             for c in v_hole:
+                 known_card_strs.add(str(c))
+        
+        # known_cards set for backup (debugging)
+        # known_cards = set(hero_hole + board)
+        
+    except Exception as e:
+        print(f"DEBUG EV CRASH setup: {e}")
+        raise e
+        
+    deck = [c for c in full_deck_list if str(c) not in known_card_strs]
+    
+    # 2. Determine cards to come
+    cards_needed = 5 - len(board)
+    actual_samples = sample_count
+    
+    if cards_needed <= 0:
+        actual_samples = 1
+        
+    hero_wins = 0.0
+    
+    for _ in range(actual_samples):
+        if cards_needed > 0 and len(deck) >= cards_needed:
+            runout = random.sample(deck, cards_needed)
+        else:
+            runout = []
+            
+        full_board = board + runout
+        
+        try:
+            # SANITIZATION + 7-choose-5 Logic
+            # Helper to sanitize a list of cards
+            def sanitize(cards):
+                # We use rank+suit string to ensure clean parsing.
+                # Card.parse returns a generator, so we use next().
+                return [next(Card.parse(f"{c.rank}{c.suit}")) for c in cards]
+            
+            # Evaluate best 5-card hand from available 7 cards (Hole + Board)
+            hero_cards = sanitize(hero_hole + full_board)
+            hero_hand = max(StandardHighHand(c) for c in combinations(hero_cards, 5))
+            
+            villain_hands = []
+            for v_hole in villain_holes:
+                v_cards = sanitize(v_hole + full_board)
+                v_hand = max(StandardHighHand(c) for c in combinations(v_cards, 5))
+                villain_hands.append(v_hand)
+            
+            if not villain_hands:
+                hero_wins += 1.0; continue
+                
+            best_villain = max(villain_hands)
+            
+            if hero_hand > best_villain:
+                hero_wins += 1.0
+            elif hero_hand == best_villain:
+                winners = 1 + villain_hands.count(hero_hand)
+                hero_wins += (1.0 / winners)
+        except Exception as e:
+            # Print only first few errors to avoid spam
+            if actual_samples == 1 or random.random() < 0.01:
+                print(f"DEBUG EV LOOP ERROR: {e}")
+            continue
+            
+    return hero_wins / actual_samples
+
+from pokerkit.analysis import calculate_equities
+from pokerkit.hands import StandardHighHand
+from pokerkit.utilities import Deck, Card, Rank
 # Добавляем импорт для генерации имени таблицы
 from poker_globals import DB_NAME, ACTION_POSITIONS, ALL_STATS_FIELDS, get_table_name_segment
 from pokerkit.utilities import Card, Rank
 import pandas as pd
 
 # --- КОНСТАНТЫ ---
-DB_NAME = 'poker_stats.db'
+# DB_NAME is imported from poker_globals
 
 def normalize_cards(cards_str: str) -> str:
     """Нормализует строку карт (AsKc -> AKo, 9h9s -> 99, QsJs -> QJss -> QJs)."""
@@ -139,6 +225,7 @@ def setup_database_table(table_segment: str):
                 board_cards TEXT,
                 rfi_opportunity INTEGER DEFAULT 0,
                 bb_size DECIMAL(10,2) DEFAULT 0,
+                ev_adjusted DECIMAL(10,2) DEFAULT 0,
                 
                 -- Новые колонки для защиты BB и стилов
                 facing_steal INTEGER DEFAULT 0,  -- 1, если игрок на BB/SB и получил опен-рейз с CO/BU/SB
@@ -205,6 +292,11 @@ def setup_database_table(table_segment: str):
 
         try:
              cursor.execute(f"ALTER TABLE my_hand_log ADD COLUMN bb_size DECIMAL(10,2) DEFAULT 0")
+        except sqlite3.OperationalError:
+             pass
+
+        try:
+             cursor.execute(f"ALTER TABLE my_hand_log ADD COLUMN ev_adjusted DECIMAL(10,2) DEFAULT 0")
         except sqlite3.OperationalError:
              pass
 
@@ -691,12 +783,17 @@ def analyze_hand_for_stats(hand_history: HandHistory):
 
 # --- 2.2 ФУНКЦИЯ АНАЛИЗА РАЗДАЧИ ИГРОКА ---
 # --- 2.2 ФУНКЦИЯ АНАЛИЗА РАЗДАЧИ ИГРОКА ---
-def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str, known_bb_size: float = 0.0):
+def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str, known_bb_size: float = 0.0) -> Dict[str, Any]:
+    
+    # 0. Проверяем, участвовал ли игрок в раздаче
+    if analyze_player_name not in hand_history.players:
+        return {}
+        
+    final_stats = {analyze_player_name: {}}
     stats_update = {}
     player_map = {}
     all_players = [p for p in hand_history.players]
     analyze_player_code = ""
-    player_bet = Decimal('0.00')
     player_bet = Decimal('0.00')
     player_win = Decimal('0.00')
     
@@ -750,7 +847,8 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str, kn
                 'cbet_flop_opp': 0,
                 'is_fold_to_cbet': 0, # fcbet_flop_succ
                 'fold_to_cbet_opp': 0,  # fcbet_flop_opp
-                'bb_size': 0.0
+                'bb_size': 0.0,
+                'ev_adjusted': 0.0
             }
 
 
@@ -1230,14 +1328,152 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str, kn
         if final_stats[analyze_player_name].get('net_profit', 0) > 0:
             final_stats[analyze_player_name]['wsd'] = 1
 
+    # 2. EV CALCULATION (All-In EV)
+    # Only if Hero went to showdown and it was an All-In situation.
+    try:
+        final_stats[analyze_player_name]['ev_adjusted'] = final_stats[analyze_player_name].get('net_profit', 0.0)
+        
+        if analyze_player_name in active_players and was_showdown and hand_history.winnings:
+             # Find Hero Index
+            if analyze_player_name in hand_history.players:
+                hero_idx = hand_history.players.index(analyze_player_name)
+                
+                # Iterate through states to find the All-In moment
+                found_all_in = False
+                hero_equity = 0.0
+                
+                # Pass 1: Gather Final Known Hands from HH Actions (Method B)
+                # We do this BEFORE state iteration to have validation map ready.
+                player_known_hands = {}
+                standard_deck_strs = {str(c) for c in Deck.STANDARD}
+                
+                if hasattr(hand_history, 'actions'):
+                     for action in hand_history.actions:
+                         # Expected format: "p{N} sm {Cards}" e.g "p2 sm AcQc"
+                         if isinstance(action, str) and ' sm ' in action:
+                             parts = action.split()
+                             if len(parts) >= 3 and parts[1] == 'sm':
+                                 p_str = parts[0] # p2
+                                 c_str = parts[2] # AcQc
+                                 if p_str.startswith('p') and c_str != '????':
+                                     try:
+                                         idx = int(p_str[1:]) - 1
+                                         parsed_cards = list(Card.parse(c_str))
+                                         player_known_hands[idx] = parsed_cards
+                                     except Exception:
+                                         pass
+                                         
+                # print(f"DEBUG EV: Gathered Known Hands (Actions): {player_known_hands}")
+
+                # Pass 2: Iterate using generic iterator (Fresh States)
+                for state in hand_history:
+                    # print(f"DEBUG LOOP State: {state.statuses} Stacks: {state.stacks}")
+                    active_indices = [idx for idx, status in enumerate(state.statuses) if status]
+                    is_all_in = any(state.stacks[idx] == 0 for idx in active_indices)
+                    
+                    if is_all_in:
+                        # Ensure Hero is actually involved
+                        if hero_idx not in active_indices:
+                            continue
+                            
+                        # Use Gathered Cards for validation/calc
+                        all_cards_valid = True
+                        calc_hole_cards = {}
+                        
+                        for idx in active_indices:
+                            # Start with current state cards
+                            cards = state.hole_cards[idx]
+                            
+                            # Check validity
+                            is_valid = False
+                            if cards:
+                                is_valid = True
+                                for c in cards:
+                                    if str(c) not in standard_deck_strs:
+                                        is_valid = False; break
+                            
+                            if not is_valid:
+                                # Try patch from gathered info
+                                if idx in player_known_hands:
+                                    cards = player_known_hands[idx]
+                                    is_valid = True 
+                                    # print(f"DB EV DEBUG: Patching Player {idx} with {cards}")
+                            
+                            if not is_valid:
+                                all_cards_valid = False
+                                # print(f"DB EV DEBUG: Player {idx} has unknown cards even after patch. Known: {list(player_known_hands.keys())}")
+                                break
+                            
+                            calc_hole_cards[idx] = cards
+                        
+                        if not all_cards_valid:
+                            continue
+                        
+                        if all_cards_valid:
+                            try:
+                                # Identify Hero and Villain Holes using PATCHED cards
+                                hero_ranges = calc_hole_cards[hero_idx]
+                                villain_indices = [idx for idx in active_indices if idx != hero_idx]
+                                villain_ranges = [calc_hole_cards[idx] for idx in villain_indices]
+                                
+                                raw_board = state.board_cards
+                                # Fix nested board
+                                board = []
+                                for item in raw_board:
+                                    if isinstance(item, list):
+                                        board.extend(item)
+                                    else:
+                                        board.append(item)
+                                
+                                deck = list(Deck.STANDARD)
+                                # print(f"DB EV DEBUG: Calcing Equity at State. Board: {board} Hero: {hero_ranges} Villains: {villain_ranges}")
+                                
+                                # Custom Calculation
+                                hero_equity = calculate_equity_monte_carlo(
+                                    hero_ranges, 
+                                    villain_ranges, 
+                                    board, 
+                                    deck, 
+                                    sample_count=1000
+                                )
+                                
+                                # print(f"DB EV DEBUG: Calculated Equity: {hero_equity}")
+                                
+                                found_all_in = True
+                                break # Stop at first All-In moment
+                                
+                            except Exception as e:
+                                # import traceback
+                                # print(f"EV Calc Error for {player_name} in hand {hand_history.hand}: {e}")
+                                # print(traceback.format_exc())
+                                break
+                
+                if found_all_in:
+                    # Calculate EV using Final Pot and All-In Equity
+                    total_pot = sum(hand_history.winnings)
+                    hero_collected = hand_history.winnings[hero_idx]
+                    net_profit_val = float(final_stats[analyze_player_name].get('net_profit', 0.0))
+                    hero_invested = float(hero_collected) - net_profit_val
+                    
+                    ev_val = (float(total_pot) * hero_equity) - hero_invested
+                    
+                    final_stats[analyze_player_name]['ev_adjusted'] = ev_val
+                    # print(f"EV CALC SUCCESS: {analyze_player_name} Eq: {hero_equity:.2f} EV: {ev_val:.2f}")
+
+    except Exception as e:
+        # print(f"General EV Logic Error for {analyze_player_name}: {e}")
+        # import traceback
+        pass
 
     return final_stats
 
 def update_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]], table_segment: str):
     """Обновляет статистику в динамической таблице, включая 3Bet и Fold to 3Bet."""
+    
     if not stats_to_commit:
         return
 
+    # 1. Сначала настраиваем таблицу (если нет)
     setup_database_table(table_segment)
     safe_table_name = table_segment.replace("'", "").replace(";", "").replace(" ", "")
 
@@ -1422,23 +1658,23 @@ def update_hand_stats_in_db(stats_to_commit: Dict[str, Dict[str, Any]]):
                     facing_limp, is_limp_check, is_limp_iso, normalized_hand,
                     wtsd, wsd,
                     is_3bet, is_3bet_opp, is_cbet, cbet_opp, is_fold_to_cbet, fold_to_cbet_opp,
-                    is_fold_to_3bet, fold_to_3bet_opp,
-                    bb_size
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """, (
-                hand_id, table_part_name, player_name, position, cards,
-                is_rfi, is_pfr, is_vpip, first_action, first_raiser_position,
-                is_steal_attempt, net_profit, time_logged,
-                final_street, final_action, final_hand_strength,
-                facing_bet_pct_pot, opponent_position, board_cards,
-                rfi_opportunity,
-                facing_steal, is_steal_defend, is_steal_3bet, is_steal_fold, steal_success,
-                facing_limp, is_limp_check, is_limp_iso, normalized_hand,
-                wtsd, wsd,
-                is_3bet, is_3bet_opp, is_cbet, cbet_opp, is_fold_to_cbet, fold_to_cbet_opp,
                 is_fold_to_3bet, fold_to_3bet_opp,
-                data.get('bb_size', 0.0)
-            ))
+                bb_size, ev_adjusted
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            hand_id, table_part_name, player_name, position, cards,
+            is_rfi, is_pfr, is_vpip, first_action, first_raiser_position,
+            is_steal_attempt, net_profit, time_logged,
+            final_street, final_action, final_hand_strength,
+            facing_bet_pct_pot, opponent_position, board_cards,
+            rfi_opportunity,
+            facing_steal, is_steal_defend, is_steal_3bet, is_steal_fold, steal_success,
+            facing_limp, is_limp_check, is_limp_iso, normalized_hand,
+            wtsd, wsd,
+            is_3bet, is_3bet_opp, is_cbet, cbet_opp, is_fold_to_cbet, fold_to_cbet_opp,
+            is_fold_to_3bet, fold_to_3bet_opp,
+            float(data.get('bb_size', 0.0)), (float(data.get('ev_adjusted')) if data.get('ev_adjusted') is not None and float(data.get('ev_adjusted')) != 0.0 else None)
+        ))
         conn.commit()
     except Exception as e:
         print(f"Ошибка сохранения лога раздачи {hand_id}: {e}", file=sys.stderr)
@@ -1581,10 +1817,11 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
                 SUM(net_profit) as net_won_sum,
                 SUM(CASE WHEN wtsd > 0 THEN net_profit ELSE 0 END) as wsd_profit_sum,
                 SUM(CASE WHEN wtsd = 0 OR wtsd IS NULL THEN net_profit ELSE 0 END) as wnsd_profit_sum,
-                0 as ev_sum,
+                SUM(COALESCE(ev_adjusted, net_profit)) as ev_sum,
                 SUM(CASE WHEN bb_size > 0 THEN net_profit / bb_size ELSE 0 END) as bb_won_sum,
                 SUM(CASE WHEN wtsd > 0 AND bb_size > 0 THEN net_profit / bb_size ELSE 0 END) as wsd_bb_sum,
-                SUM(CASE WHEN (wtsd = 0 OR wtsd IS NULL) AND bb_size > 0 THEN net_profit / bb_size ELSE 0 END) as wnsd_bb_sum
+                SUM(CASE WHEN (wtsd = 0 OR wtsd IS NULL) AND bb_size > 0 THEN net_profit / bb_size ELSE 0 END) as wnsd_bb_sum,
+                SUM(CASE WHEN bb_size > 0 THEN COALESCE(ev_adjusted, net_profit) / bb_size ELSE 0 END) as ev_bb_sum
             
             FROM my_hand_log 
             WHERE player_name = ?
@@ -1621,6 +1858,7 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
         bb_won_data = {"total": 0.0, "utg": 0.0, "mp": 0.0, "co": 0.0, "bu": 0.0, "sb": 0.0, "bb": 0.0}
         wsd_bb_data = {"total": 0.0, "utg": 0.0, "mp": 0.0, "co": 0.0, "bu": 0.0, "sb": 0.0, "bb": 0.0}
         wnsd_bb_data = {"total": 0.0, "utg": 0.0, "mp": 0.0, "co": 0.0, "bu": 0.0, "sb": 0.0, "bb": 0.0}
+        ev_bb_data = {"total": 0.0, "utg": 0.0, "mp": 0.0, "co": 0.0, "bu": 0.0, "sb": 0.0, "bb": 0.0}
         
         
         # New Steal Aggregators
@@ -1698,6 +1936,7 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
             bb_won_val = float(row[30]) if row[30] else 0.0
             wsd_bb_val = float(row[31]) if row[31] else 0.0
             wnsd_bb_val = float(row[32]) if row[32] else 0.0
+            ev_bb_val = float(row[33]) if len(row) > 33 and row[33] else 0.0
 
             # Агрегация по позициям
             if pos in hands_data:
@@ -1751,6 +1990,7 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
                 bb_won_data[pos] += bb_won_val
                 wsd_bb_data[pos] += wsd_bb_val
                 wnsd_bb_data[pos] += wnsd_bb_val
+                ev_bb_data[pos] += ev_bb_val
             
             net_won_data["total"] += net_won_val
             wsd_profit_data["total"] += wsd_profit_val
@@ -1759,6 +1999,7 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
             bb_won_data["total"] += bb_won_val
             wsd_bb_data["total"] += wsd_bb_val
             wnsd_bb_data["total"] += wnsd_bb_val
+            ev_bb_data["total"] += ev_bb_val
         
 
         hands_data["total"] = total_hands_all
@@ -1835,6 +2076,7 @@ def get_player_extended_stats(player_name: str, table_segment: str, min_time: Op
             "bb_won": bb_won_data,
             "wsd_bb": wsd_bb_data,
             "wnsd_bb": wnsd_bb_data,
+            "ev_bb": ev_bb_data,
             "steal_success": steal_succ_pct
         }
         
@@ -1966,7 +2208,9 @@ def get_player_hand_log_df(player_name: str, min_time: Optional[datetime.datetim
              df['bb_won'] = df['net_won'] / df['effective_bb_size']
              
              # For EV adjusted (if needed)
+             # For EV adjusted (if needed)
              if 'ev_adjusted' in df.columns:
+                 # df['ev_adjusted'] = df['ev_adjusted'].fillna(0.0) # Correct: Leave NaN for Graph Widget to fill with Net
                  df['ev_adjusted_bb'] = df['ev_adjusted'] / df['effective_bb_size']
 
         return df

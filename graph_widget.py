@@ -171,153 +171,140 @@ class PokerGraphWidget(QWidget):
         self._redraw_graph()
 
     def _redraw_graph(self):
-        if self.df is None or self.df.empty:
+        try:
+            if self.df is None or self.df.empty:
+                self.ax.clear()
+                self.canvas.draw()
+                if hasattr(self, 'header_label'):
+                    self.header_label.setText("No Data")
+                return
+            
+            # Выбор колонок в зависимости от режима
+            col_net = 'net_won'
+            col_ev = 'ev_adjusted'
+            col_sd = 'showdown_won'
+            col_nsd = 'non_showdown_won'
+            
+            if self.current_mode == 'BB':
+                if 'bb_won' in self.df.columns: col_net = 'bb_won'
+                elif 'net_won_bb' in self.df.columns: col_net = 'net_won_bb'
+                else: pass
+                
+                if 'ev_adjusted_bb' in self.df.columns: col_ev = 'ev_adjusted_bb'
+                if 'showdown_won_bb' in self.df.columns: col_sd = 'showdown_won_bb'
+                if 'non_showdown_won_bb' in self.df.columns: col_nsd = 'non_showdown_won_bb'
+
             self.ax.clear()
+            
+            # 1. Расчет кумулятивных сумм
+            # Net
+            if col_net in self.df.columns:
+                data_net = self.df[col_net].cumsum()
+            elif self.current_mode == 'BB' and 'net_won' in self.df.columns:
+                 data_net = pd.Series([0]*len(self.df))
+            else:
+                if hasattr(self, 'header_label'):
+                    self.header_label.setText("No Data (Missing Net Won)")
+                return
+
+            # EV
+            if col_ev in self.df.columns:
+                # Fill NaNs with Net Won (Realized EV)
+                if self.df[col_ev].isnull().any():
+                     # Caution: fillna with column requires index alignment, which implies row-wise fill if correctly done.
+                     # ensure alignment
+                     self.df[col_ev] = self.df[col_ev].fillna(self.df[col_net])
+                     # Safety fallback if net is also NaN (shouldnt happen)
+                     self.df[col_ev] = self.df[col_ev].fillna(0.0)
+                data_ev = self.df[col_ev].cumsum()
+            else:
+                 data_ev = pd.Series([0]*len(self.df))
+                 
+            # SD / NSD
+            has_sd_col = col_sd in self.df.columns
+            has_nsd_col = col_nsd in self.df.columns
+            
+            if has_sd_col:
+                data_sd = self.df[col_sd].cumsum()
+            else:
+                # Пытаемся вычислить из Net
+                if 'wtsd' in self.df.columns and col_net in self.df.columns:
+                     sd_vals = self.df.apply(lambda x: x[col_net] if x['wtsd'] else 0.0, axis=1)
+                     data_sd = sd_vals.cumsum()
+                else:
+                     data_sd = pd.Series([0]*len(self.df))
+
+            if has_nsd_col:
+                data_nsd = self.df[col_nsd].cumsum()
+            else:
+                # Пытаемся вычислить из Net
+                if 'wtsd' in self.df.columns and col_net in self.df.columns:
+                     # NSD = Total - SD (roughly) or logic: if not wtsd, then val.
+                     # But simple approach: all profit where NOT wtsd
+                     nsd_vals = self.df.apply(lambda x: x[col_net] if not x['wtsd'] else 0.0, axis=1)
+                     data_nsd = nsd_vals.cumsum()
+                else:
+                     data_nsd = pd.Series([0]*len(self.df))
+
+            # Ось X
+            x_values = range(len(self.df))
+
+            # 2. Рисование
+            self.ax.plot(x_values, data_sd, label='Showdown', color='#2980b9', linewidth=1.5, alpha=0.9)
+            self.ax.plot(x_values, data_nsd, label='Non-Showdown', color='#e74c3c', linewidth=1.5, alpha=0.9)
+            self.ax.plot(x_values, data_ev, label='EV Adjusted', color='#f1c40f', linewidth=2, alpha=0.7)
+            self.ax.plot(x_values, data_net, label='Net Won', color='#2ecc71', linewidth=2.5)
+
+            # 3. Оформление
+            self.ax.axhline(0, color='gray', linestyle='--', linewidth=1, alpha=0.5)
+            self.ax.grid(True, which='both', color='gray', linestyle='-', linewidth=0.5, alpha=0.2)
+            self.ax.legend(loc='upper left', frameon=True, facecolor='#2b2b2b', edgecolor='gray')
+            
+            title_unit = "($)" if self.current_mode == 'USD' else "(BB)"
+            
+            # Calculate Stats for Header
+            total_val = 0.0
+            bb_100 = 0.0
+            if not data_net.empty:
+                total_val = float(data_net.iloc[-1])
+                
+            color = "#2ecc71" if total_val > 0 else "#e74c3c" if total_val < 0 else "gray"
+            
+            stats_html = ""
+            if self.current_mode == 'USD':
+                fmt_val = f"+${total_val:,.2f}" if total_val >= 0 else f"-${abs(total_val):,.2f}"
+                stats_html = f"<span style='color: {color};'>({fmt_val})</span>"
+            else:
+                # BB Mode
+                total_hands = len(self.df)
+                if total_hands > 0:
+                    bb_100 = (total_val / total_hands) * 100
+                    
+                fmt_val = f"+{total_val:,.1f}" if total_val >= 0 else f"{total_val:,.1f}"
+                stats_html = f"<span style='color: {color};'>({fmt_val} BB / {bb_100:.1f} BB/100)</span>"
+                
+            if hasattr(self, 'header_label'):
+                self.header_label.setText(f"Cumulative Results {title_unit} {stats_html}")
+
+            self.ax.set_xlabel("Hands", color='gray')
+            self.ax.set_ylabel(f"Result {title_unit}", color='gray')
+            
+            self.ax.tick_params(axis='x', colors='gray')
+            self.ax.tick_params(axis='y', colors='gray')
+            
+            for spine in self.ax.spines.values():
+                spine.set_color('gray')
+                spine.set_alpha(0.5)
+
             self.canvas.draw()
-            if hasattr(self, 'header_label'):
-                self.header_label.setText("No Data")
-            return
-            
-        
-        # Выбор колонок в зависимости от режима
-        suffix = "" if self.current_mode == 'USD' else "_bb"
-        # Для BB режима ищем колонки 'bb_won' (стандартное название) вместо 'net_won_bb'
-        # Но если мы хотим унификации, проверим оба варианта.
-        
-        # Определяем базовые имена колонок
-        col_net = 'net_won'
-        col_ev = 'ev_adjusted'
-        col_sd = 'showdown_won'
-        col_nsd = 'non_showdown_won'
-        
-        # Если режим BB, пытаемся найти соответствующие колонки
-        if self.current_mode == 'BB':
-            # Приоритет 1: bb_won
-            if 'bb_won' in self.df.columns:
-                col_net = 'bb_won'
-            elif 'net_won_bb' in self.df.columns:
-                col_net = 'net_won_bb'
-            else:
-                # Если нет данных в BB, можно попробовать конвертировать, если есть 'blind_amount'
-                # Иначе fallback to USD or 0
-                pass
-                
-            if 'ev_adjusted_bb' in self.df.columns:
-                col_ev = 'ev_adjusted_bb'
-            
-            if 'showdown_won_bb' in self.df.columns:
-                col_sd = 'showdown_won_bb'
-                
-            if 'non_showdown_won_bb' in self.df.columns:
-                col_nsd = 'non_showdown_won_bb'
 
-        self.ax.clear()
-        
-        # 1. Расчет кумулятивных сумм
-        # Net
-        if col_net in self.df.columns:
-            data_net = self.df[col_net].cumsum()
-        elif self.current_mode == 'BB' and 'net_won' in self.df.columns:
-             # Попытка имитации (если это тест) или 0
-             # Для теста в __main__ мы добавим 'bb_won'
-             data_net = pd.Series([0]*len(self.df))
-        else:
-            if hasattr(self, 'header_label'):
-                self.header_label.setText("No Data (Missing Net Won)")
-            return
+        except Exception as e:
+            print(f"CRITICAL GRAPH ERROR: {e}")
+            import traceback
+            traceback.print_exc()
 
-        # EV
-        if col_ev in self.df.columns:
-            data_ev = self.df[col_ev].cumsum()
-        elif self.current_mode == 'BB' and 'ev_adjusted' in self.df.columns:
-             # Fallback: Если нет EV_BB, не рисуем линию или рисуем 0
-             data_ev = pd.Series([0]*len(self.df))
-        else:
-             data_ev = pd.Series([0]*len(self.df))
-             
-        # SD / NSD
-        # Логика расчета SD/NSD, если их нет явно
-        has_sd_col = col_sd in self.df.columns
-        has_nsd_col = col_nsd in self.df.columns
-        
-        if has_sd_col:
-            data_sd = self.df[col_sd].cumsum()
-        else:
-            # Пытаемся вычислить из Net
-            if 'wtsd' in self.df.columns and col_net in self.df.columns:
-                 sd_vals = self.df.apply(lambda x: x[col_net] if x['wtsd'] else 0.0, axis=1)
-                 data_sd = sd_vals.cumsum()
-            else:
-                 data_sd = pd.Series([0]*len(self.df))
+        # End of _redraw_graph logic
 
-        if has_nsd_col:
-            data_nsd = self.df[col_nsd].cumsum()
-        else:
-            # Пытаемся вычислить из Net
-            if 'wtsd' in self.df.columns and col_net in self.df.columns:
-                 nsd_vals = self.df.apply(lambda x: x[col_net] if not x['wtsd'] else 0.0, axis=1)
-                 data_nsd = nsd_vals.cumsum()
-            else:
-                 data_nsd = pd.Series([0]*len(self.df))
-
-
-        # Ось X
-        x_values = range(len(self.df))
-
-        # 2. Рисование
-        # Showdown (Blue)
-        self.ax.plot(x_values, data_sd, label='Showdown', color='#2980b9', linewidth=1.5, alpha=0.9)
-        
-        # Non-Showdown (Red)
-        self.ax.plot(x_values, data_nsd, label='Non-Showdown', color='#e74c3c', linewidth=1.5, alpha=0.9)
-        
-        # EV Adjusted (Orange/Yellow)
-        self.ax.plot(x_values, data_ev, label='EV Adjusted', color='#f1c40f', linewidth=2, alpha=0.7)
-
-        # Net Won (Green)
-        self.ax.plot(x_values, data_net, label='Net Won', color='#2ecc71', linewidth=2.5)
-
-        # 3. Оформление
-        self.ax.axhline(0, color='gray', linestyle='--', linewidth=1, alpha=0.5)
-        self.ax.grid(True, which='both', color='gray', linestyle='-', linewidth=0.5, alpha=0.2)
-        self.ax.legend(loc='upper left', frameon=True, facecolor='#2b2b2b', edgecolor='gray')
-        
-        title_unit = "($)" if self.current_mode == 'USD' else "(BB)"
-        
-        # Calculate Stats for Header
-        total_val = 0.0
-        bb_100 = 0.0
-        if not data_net.empty:
-            total_val = float(data_net.iloc[-1])
-            
-        color = "#2ecc71" if total_val > 0 else "#e74c3c" if total_val < 0 else "gray"
-        
-        stats_html = ""
-        if self.current_mode == 'USD':
-            fmt_val = f"+${total_val:,.2f}" if total_val >= 0 else f"-${abs(total_val):,.2f}"
-            stats_html = f"<span style='color: {color};'>({fmt_val})</span>"
-        else:
-            # BB Mode
-            total_hands = len(self.df)
-            if total_hands > 0:
-                bb_100 = (total_val / total_hands) * 100
-                
-            fmt_val = f"+{total_val:,.1f}" if total_val >= 0 else f"{total_val:,.1f}"
-            stats_html = f"<span style='color: {color};'>({fmt_val} BB / {bb_100:.1f} BB/100)</span>"
-            
-        self.header_label.setText(f"Cumulative Results {title_unit} {stats_html}")
-
-        self.ax.set_xlabel("Hands", color='gray')
-        self.ax.set_ylabel(f"Result {title_unit}", color='gray')
-        
-        self.ax.tick_params(axis='x', colors='gray')
-        self.ax.tick_params(axis='y', colors='gray')
-        
-        for spine in self.ax.spines.values():
-            spine.set_color('gray')
-            spine.set_alpha(0.5)
-
-        self.canvas.draw()
 
 # --- Тестовый запуск ---
 if __name__ == "__main__":

@@ -1,0 +1,41 @@
+PokerStars Hand #259099017954:  Hold'em No Limit ($0.01/$0.02 USD) - 2025/12/30 12:57:24 EET [2025/12/30 5:57:24 ET]
+Table 'Rezia II' 6-max Seat #6 is the button
+Seat 1: tovasss ($2 in chips) 
+Seat 2: dgslapit ($2.14 in chips) 
+Seat 3: Pijan1806 ($4.47 in chips) 
+Seat 4: Martyr40 ($1 in chips) 
+Seat 5: Presitno1995 ($1.92 in chips) 
+Seat 6: Schos25 ($2.12 in chips) 
+tovasss: posts small blind $0.01
+dgslapit: posts big blind $0.02
+*** HOLE CARDS ***
+Dealt to Martyr40 [Js Jc]
+Pijan1806: raises $0.04 to $0.06
+Martyr40: raises $0.12 to $0.18
+Presitno1995: folds 
+Schos25: calls $0.18
+tovasss: folds 
+dgslapit: raises $1.96 to $2.14 and is all-in
+Pijan1806: folds 
+Martyr40: calls $0.82 and is all-in
+Schos25: folds 
+Uncalled bet ($1.14) returned to dgslapit
+*** FLOP *** [9d 6h Ks]
+*** TURN *** [9d 6h Ks] [4c]
+*** RIVER *** [9d 6h Ks 4c] [6s]
+*** SHOW DOWN ***
+dgslapit: shows [Ac Qc] (a pair of Sixes)
+Martyr40: shows [Js Jc] (two pair, Jacks and Sixes)
+Martyr40 collected $2.14 from pot
+*** SUMMARY ***
+Total pot $2.25 | Rake $0.11 
+Board [9d 6h Ks 4c 6s]
+Seat 1: tovasss (small blind) folded before Flop
+Seat 2: dgslapit (big blind) showed [Ac Qc] and lost with a pair of Sixes
+Seat 3: Pijan1806 folded before Flop
+Seat 4: Martyr40 showed [Js Jc] and won ($2.14) with two pair, Jacks and Sixes
+Seat 5: Presitno1995 folded before Flop (didn't bet)
+Seat 6: Schos25 (button) folded before Flop
+
+
+

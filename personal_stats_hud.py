@@ -350,7 +350,8 @@ class PersonalStatsWindow(QWidget):
             # Row 6: WNSD BB/100
             set_cell(6, col_idx, wnsd_bb_data.get(pos, 0.0), cnt_hands, True)
             # Row 7: EV BB/100
-            set_cell(7, col_idx, ev_data.get(pos, 0.0), cnt_hands, True)
+            # Use 'ev_bb_data' (Total BBs) instead of 'ev_data' (Total Dollars)
+            set_cell(7, col_idx, stats.get('ev_bb', {}).get(pos, 0.0), cnt_hands, True)
 
         # Row 3: RFI
         rfi_positions = ["utg", "mp", "co", "bu", "sb"]
