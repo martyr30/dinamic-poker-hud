@@ -4,6 +4,7 @@ import sqlite3
 import decimal
 import datetime
 import sys
+import os
 from typing import Dict, Any, List, Optional
 from decimal import Decimal
 from pokerkit import HandHistory
@@ -130,6 +131,17 @@ def normalize_cards(cards_str: str) -> str:
         return f"{r1}{r2}o"
 
 # --- 1. ФУНКЦИИ НАСТРОЙКИ БАЗЫ ДАННЫХ ---
+
+def remove_database_files():
+    """Удаляет файлы базы данных (db, wal, shm) для полной перезагрузки."""
+    for ext in ["", "-wal", "-shm"]:
+        path = DB_NAME + ext
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+                print(f"🗑️ Удален файл базы данных: {path}")
+            except Exception as e:
+                print(f"❌ Ошибка удаления {path}: {e}")
 
 def setup_database_table(table_segment: str):
     """Создает таблицу статистики с уникальным именем, если она не существует."""

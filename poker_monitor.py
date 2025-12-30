@@ -13,7 +13,10 @@ from poker_stats_db import (
     analyze_hand_for_stats,
     update_stats_in_db,
     analyze_player_stats,
-    update_hand_stats_in_db
+    analyze_player_stats,
+    update_hand_stats_in_db,
+    get_stats_for_players, 
+    get_player_extended_stats
 )
 # --- КЛАСС СИГНАЛОВ ---
 
@@ -99,7 +102,7 @@ def extract_seats_from_content(content: str) -> Dict[str, int]:
         
     return seat_map
 
-def process_file_update(file_path: str, filter_segment: Optional[str] = None, filter_date: Optional[str] = None) -> Optional[StatUpdateData]:
+def process_file_update(file_path: str, filter_segment: Optional[str] = None, filter_date: Optional[str] = None, session_start_time: Optional[datetime.datetime] = None) -> Optional[StatUpdateData]:
     """
     Парсит новую раздачу, ОБНОВЛЯЕТ БД и возвращает 4 значения.
     """
@@ -169,19 +172,74 @@ def process_file_update(file_path: str, filter_segment: Optional[str] = None, fi
             update_hand_stats_in_db(player_stats_to_commit)
         
         # 3. Извлекаем точные места игроков из текста последней раздачи
-        # Мы делаем это отдельно от pokerkit, чтобы гарантировать наличие номеров мест
+        first_hand_in_batch = hhs_list[0] # Используем первую раздачу батча для определения даты сессии
+        session_start_time = datetime.datetime.combine(
+            datetime.date(first_hand_in_batch.year, first_hand_in_batch.month, first_hand_in_batch.day),
+            datetime.time.min
+        )
+
         last_hand_seat_map = extract_seats_from_content(new_content)
-        
-        # Если не удалось извлечь (например, формат изменился), берем просто список имен из последней hh
         if not last_hand_seat_map and hhs_list:
              last_hand_seat_map = {p: 0 for p in hhs_list[-1].players}
 
+        # 4. ПРЕДВАРИТЕЛЬНАЯ ЗАГРУЗКА СТАТИСТИКИ (В ПОТОКЕ)
+        # Чтобы не блокировать GUI, читаем данные здесь.
+        
+        # 4.1 Статистика игроков за столом
+        player_names = list(last_hand_seat_map.keys())
+        table_stats = {}
+        if player_names:
+            table_stats = get_stats_for_players(player_names, table_segment)
+
+        # 4.2 Сессионная статистика Hero (если он есть)
+        hero_stats = {}
+        if MY_PLAYER_NAME in player_names:
+             # Fetch stats starting from session_start_time (or default to recent if None)
+             # If session_start_time is None, we might fetch nothing or all day?
+             # Let's assume passed session_start_time is valid.
+             if session_start_time:
+                 hero_stats = get_player_extended_stats(MY_PLAYER_NAME, "", min_time=session_start_time)
+             else:
+                 # Fallback: fetch for today if no start time given
+                 today = datetime.datetime.combine(datetime.date.today(), datetime.time.min)
+                 hero_stats = get_player_extended_stats(MY_PLAYER_NAME, "", min_time=today)
+
         FILE_SIZES[file_path] = current_size
 
-        # 4. ВОЗВРАЩАЕМ данные (теперь со словарем мест)
-        return (file_path, last_hand_seat_map, table_title_part, table_segment)
+        # 5. Возвращаем расширенный набор данных
+        # (file_path, seat_map, table_title_part, table_segment, table_stats, hero_stats)
+        # Note: We need to update StatUpdateData definition or just use tuple unpacking in main.py
+        # Current tuple in main.py call: _, seat_map, _, seg, pre_stats = data
+        # We can merge hero_stats into table_stats (precalculated_stats)
+        
+        # Merge Hero Stats into table_stats under MY_PLAYER_NAME key?
+        # But table_stats is formatted { 'vpip': '20.5', ... }
+        # hero_stats is { 'vpip': {'total': ...}, ... } (Extended format)
+        # We should formatting it here to be consistent or handle it in main.py.
+        # Let's handle formatting here to keep main.py simple.
+        
+        if hero_stats:
+             # Format hero stats to HUD format
+             hud_data = {
+                  'hands': hero_stats['hands']['total'],
+                  'vpip': hero_stats['vpip']['total'],
+                  'pfr': hero_stats['pfr']['total'],
+                  '3bet': hero_stats.get('3bet', {}).get('total', '0.0'),
+                  'f3bet': '0.0', 
+                  'cbet': hero_stats.get('cbet', {}).get('total', '0.0'),
+                  'fcbet': hero_stats.get('fold_to_cbet', {}).get('total', '0.0'),
+                  'wtsd': hero_stats.get('wtsd', {}).get('wtsd', '0.0'), 
+                  'wsd': hero_stats.get('wtsd', {}).get('wsd', '0.0'),
+                  'af': '0.0'
+             }
+             table_stats[MY_PLAYER_NAME] = hud_data
+        
+
+        return (file_path, last_hand_seat_map, table_title_part, table_segment, table_stats)
 
     except Exception as e:
+        import traceback
+        traceback.print_exc()
         print(f"❌ Критическая ошибка парсинга в {os.path.basename(file_path)}: {e}")
         return None
 
@@ -249,13 +307,14 @@ def process_file_full_load(file_path: str, filter_segment: Optional[str] = None,
 
 class WatchdogThread(QThread):
     """Поток для мониторинга директории с файлами истории раздач."""
-    def __init__(self, directory: str, signals: MonitorSignals, filter_segment: Optional[str] = None, filter_date: Optional[str] = None, parent=None):
+    def __init__(self, directory: str, signals: MonitorSignals, filter_segment: Optional[str] = None, filter_date: Optional[str] = None, session_start_time: Optional[datetime.datetime] = None, parent=None):
         super().__init__(parent)
         self.directory = directory
         self.signals = signals
         self._running = True
         self.filter_segment = filter_segment
         self.filter_date = filter_date
+        self.session_start_time = session_start_time
 
     def stop(self):
         self._running = False
@@ -269,7 +328,7 @@ class WatchdogThread(QThread):
                     full_path = os.path.join(self.directory, item)
 
                     if os.path.isfile(full_path) and full_path.endswith('.txt'):
-                        update_data = process_file_update(full_path, self.filter_segment, self.filter_date)
+                        update_data = process_file_update(full_path, self.filter_segment, self.filter_date, self.session_start_time)
 
                         if update_data:
                             self.signals.stat_updated.emit(update_data)
