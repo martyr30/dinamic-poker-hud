@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
     QHeaderView, QDateEdit, QPushButton, QHBoxLayout, QCheckBox, QFrame
 )
-from PySide6.QtCore import Qt, QTimer, QDate, QPoint
+from PySide6.QtCore import Qt, QTimer, QDate, QPoint, Signal
 from PySide6.QtGui import QMouseEvent, QColor
 from datetime import datetime, time
 from poker_stats_db import get_player_extended_stats, get_chart_hands_data, get_player_hand_log_df
@@ -15,6 +15,9 @@ class PersonalStatsWindow(QWidget):
     Отдельное окно для отображения расширенной статистики текущего игрока (Hero).
     Позволяет фильтровать статистику по дате.
     """
+
+    # Сигнал закрытия окна
+    window_closed = Signal()
 
     def __init__(self, target_player_name: str):
         super().__init__()
@@ -260,6 +263,21 @@ class PersonalStatsWindow(QWidget):
         except Exception as e:
             print(f"Ошибка обновления личной статистики: {e}")
 
+    def closeEvent(self, event):
+        self.close_all_children()
+        self.window_closed.emit()
+        event.accept()
+
+    def close_all_children(self):
+        """Закрывает все дочерние окна (графики и т.д.)."""
+        # Закрываем окно графика
+        if hasattr(self, '_graph_window') and self._graph_window:
+            self._graph_window.close()
+            self._graph_window = None
+        
+        # Если есть другие (например, HandChartDialog блокирующий, он закроется сам)
+        pass
+
     def toggle_mode(self):
         """Переключение между полным и мини-режимом."""
         self.is_mini_mode = not self.is_mini_mode
@@ -497,6 +515,8 @@ class PersonalStatsWindow(QWidget):
             # Keep reference to avoid garbage collection
             self._graph_window = QWidget()
             self._graph_window.setWindowTitle(f"Graph: {self.target_player}")
+            # Ensure it stays on top of the Always-On-Top parent stats window
+            self._graph_window.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.WindowStaysOnTopHint)
             self._graph_window.resize(900, 600)
             layout = QVBoxLayout(self._graph_window)
             
@@ -506,6 +526,8 @@ class PersonalStatsWindow(QWidget):
             graph_widget.plot_data(df)
             
             self._graph_window.show()
+            self._graph_window.raise_()
+            self._graph_window.activateWindow()
             
         except Exception as e:
             print(f"Error opening graph: {e}")

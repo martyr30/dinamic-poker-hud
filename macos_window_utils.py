@@ -90,19 +90,23 @@ class MacOSWindowAdapter:
             self._rect = (0, 0, 0, 0)
         return geo
 
+    def refresh(self):
+        """Manually triggers a geometry update."""
+        return self.update_geometry()
+
     @property
     def topleft(self):
-        self.update_geometry()
+        # self.update_geometry() # REMOVED: Use cached
         return (self._rect[0], self._rect[1])
 
     @property
     def width(self):
-        self.update_geometry()
+        # self.update_geometry() # REMOVED: Use cached
         return self._rect[2]
 
     @property
     def height(self):
-        self.update_geometry()
+        # self.update_geometry() # REMOVED: Use cached
         return self._rect[3]
     
     @property
@@ -111,12 +115,12 @@ class MacOSWindowAdapter:
     
     @property
     def left(self):
-        self.update_geometry()
+        # self.update_geometry() # REMOVED: Use cached
         return self._rect[0]
 
     @property
     def top(self):
-        self.update_geometry()
+        # self.update_geometry() # REMOVED: Use cached
         return self._rect[1]
 
     def exists(self):

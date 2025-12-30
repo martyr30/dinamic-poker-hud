@@ -14,8 +14,8 @@ TARGET_HISTORY_DIR = '/Users/admin/Library/Application Support/PokerStars/HandHi
 FILE_SIZES: Dict[str, int] = {}
 
 MY_PLAYER_NAME = "Martyr40"
-# Структура для передачи данных: (file_path, list_of_player_names, table_title_part, table_segment)
-StatUpdateData = Tuple[str, Dict[str, int], str, str]
+# Структура для передачи данных: (file_path, seat_map, table_title_part, table_segment, table_stats)
+StatUpdateData = Tuple[str, Dict[str, int], str, str, Dict[str, Any]]
 
 ACTION_POSITIONS = ["utg", "mp", "co", "bu"]
 

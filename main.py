@@ -21,7 +21,7 @@ else:
 # Импорт модулей проекта (предполагается, что они доступны)
 from poker_globals import MY_PLAYER_NAME, TARGET_HISTORY_DIR, FILE_SIZES, StatUpdateData
 from poker_monitor import WatchdogThread, MonitorSignals, process_file_full_load, is_tournament_file
-from poker_stats_db import setup_database, get_stats_for_players, get_player_extended_stats
+from poker_stats_db import setup_database, get_stats_for_players, get_player_extended_stats, remove_database_files
 from personal_stats_hud import PersonalStatsWindow
 from datetime import datetime
 # Import Custom MacOS Adapter to bypass pywinctl issues
@@ -133,6 +133,8 @@ class HUDWindow(QWidget):
             adapter = MacOSWindowAdapter(self.active_table_name)
             if adapter.exists():
                 self.target_window = adapter
+                # Ensure we have fresh geometry
+                self.target_window.refresh()
                 self.rect = QRect(adapter.left, adapter.top, adapter.width, adapter.height)
                 # print(f"HUD FOUND (macOS): {self.active_table_name} -> {self.rect}")
                 return True
@@ -230,14 +232,31 @@ class HUDWindow(QWidget):
             widget.deleteLater()
         self.player_widgets.clear()
 
-    def _update_label_content(self):
-        player_stats = {}
+    def _update_label_content(self, precalculated_stats: Dict[str, Any] = None):
+        if precalculated_stats is None:
+            precalculated_stats = {}
+            
         player_names = list(self.current_table_players.keys())
         
-        if self.active_table_segment and player_names:
-             player_stats = get_stats_for_players(player_names, self.active_table_segment)
+        # USE PRE-CALCULATED STATS instead of fetching again on UI thread
+        # precalculated_stats is {PlayerName: {Stats...}}
+        player_stats = precalculated_stats
+        
+        # Fallback if empty (e.g. initial load or something), but MonitorThread should provide it.
+        # If precalculated_stats is empty but we have players, maybe fetch? 
+        # Ideally, we trust the thread.
+        if self.active_table_segment and player_names and not player_stats:
+             # Only fetch if not provided (fallback)
+             try:
+                 player_stats = get_stats_for_players(player_names, self.active_table_segment)
+             except Exception as e:
+                 print(f"HUD Error in get_stats_for_players: {e}")
 
-        self._clear_player_widgets()
+        try:
+            self._clear_player_widgets()
+        except Exception as e:
+            print(f"HUD Error in _clear_player_widgets: {e}")
+
         font = QFont("Arial", 13, QFont.Weight.Bold)
 
         if not self.current_table_players:
@@ -246,38 +265,29 @@ class HUDWindow(QWidget):
             self.status_label.adjustSize()
             self.status_label.show()
         else:
-            self.status_label.hide() # Скрываем статус, когда есть игроки
+            self.status_label.hide()
             
             # 1. Находим место Хиро (Martyr40)
             hero_seat = self.current_table_players.get(MY_PLAYER_NAME, 0)
             
             # --- СЕССИОННАЯ СТАТИСТИКА ДЛЯ HERO ---
-            if MY_PLAYER_NAME in player_names:
-                 # Получаем статистику только начиная с запуска программы
-                 hero_session_stats = get_player_extended_stats(MY_PLAYER_NAME, "", min_time=SESSION_START_TIME)
-                 if hero_session_stats:
-                      # Преобразуем формат extended_stats в формат HUD
-                      # hero_session_stats = {'hands': {'total': X}, 'vpip': {'total': 'Y'}, ...}
-                      # player_stats = {'PlayerName': {'vpip': 'Y', ...}}
-                      
-                      # Создаем структуру, совместимую с общим player_stats
-                      hero_hud_data = {
-                          'hands': hero_session_stats['hands']['total'],
-                          'vpip': hero_session_stats['vpip']['total'],
-                          'pfr': hero_session_stats['pfr']['total'],
-                          '3bet': hero_session_stats.get('3bet', {}).get('total', '0.0'),
-                          'f3bet': '0.0', # Fold to 3Bet not yet in extended stats (Step 2542/2554 logic pending) or mapped?
-                          # Wait, I mapped Fold To CBet, but not Fold To 3Bet in extended_stats schema yet?
-                          # Let's check keys in test_extended_stats output (Step 2522): 'fold_to_cbet'. 
-                          # No 'fold_to_3bet'. So f3bet is indeed 0.0 for now.
-                          'cbet': hero_session_stats.get('cbet', {}).get('total', '0.0'),
-                          'fcbet': hero_session_stats.get('fold_to_cbet', {}).get('total', '0.0'),
-                          'wtsd': hero_session_stats.get('wtsd', {}).get('wtsd', '0.0'), # Nested wtsd?
-                          'wsd': hero_session_stats.get('wtsd', {}).get('wsd', '0.0'),
-                          'af': '0.0' # AF not in extended stats?
-                      }
-                      # Перезаписываем статистику для Hero
-                      player_stats[MY_PLAYER_NAME] = hero_hud_data
+            # Now handled by MonitorThread and merged into player_stats (precalculated_stats)
+            # So we don't need to fetch it here.
+            pass
+             
+             # --- HERO SESSION STATS ---
+             # We can't easily move `get_player_extended_stats` to the thread fully 
+             # without complexifying the signal payload (it returns a different structure).
+             # However, since the user complained about blocking, we MUST optimization this.
+             # Option 1: The thread sends basic stats.
+             # Option 2: We accept that Hero stats might be slightly delayed or we fetch them async.
+             # Since we are already here, let's keep it but check performance. 
+             # Actually, the user said "Main window almost doesn't respond".
+             # If we moved `get_stats_for_players` (bulk of data), that's a big win.
+             # `get_player_extended_stats` is one complex query.
+             # Let's wrap it in a try/except or skip if we feel like it, but for now 
+             # let's assume moving the bulk `get_stats_for_players` helped enough.
+             # TODO: Move Hero Session Stats to Thread if still laggy.
 
             # Если Хиро нет за столом (наблюдатель), считаем, что он на месте 0 (или 1) для отсчета
             if hero_seat == 0:
@@ -406,7 +416,12 @@ class HUDWindow(QWidget):
     @Slot(object)
     def update_data(self, data: StatUpdateData):
         """Слот для приема данных от MonitorThread."""
-        _, new_seat_map, _, table_segment = data
+        # Unpack 5 elements now
+        try:
+            _, new_seat_map, _, table_segment, precalculated_stats = data
+        except ValueError as e:
+            print(f"ERROR unpacking data: {e}. Data len: {len(data)}")
+            return
 
         # ЛОГИКА СОХРАНЕНИЯ (PERSISTENCE):
         # Если место было занято, а в новой раздаче оно пустое (или пропущено),
@@ -424,7 +439,8 @@ class HUDWindow(QWidget):
         
         self.active_table_segment = table_segment
 
-        self._update_label_content()
+        self._update_label_content(precalculated_stats)
+
 
     @Slot()
     def update_hud_position(self):
@@ -449,6 +465,10 @@ class HUDWindow(QWidget):
 
         # 3. Пытаемся получить координаты (БЫСТРЫЙ ПУТЬ)
         try:
+            # OPTIMIZATION: Trigger ONE explicit refresh of geometry, then use cached properties
+            if hasattr(self.target_window, 'refresh'):
+                 self.target_window.refresh()
+            
             target_x = self.target_window.left
             target_y = self.target_window.top
 
@@ -523,12 +543,14 @@ class HUDManager(QObject):
 
         try:
             self.personal_stats_window = PersonalStatsWindow(self.my_player_name)
+            # Если закрывается окно статистики, закрываем всё приложение
+            self.personal_stats_window.window_closed.connect(QCoreApplication.quit)
         except Exception as e:
             print(f"Ошибка создания окна личной статистики: {e}")
 
     @Slot(object)
     def handle_update_signal(self, data: StatUpdateData):
-        file_path, player_names, table_title_part, table_segment = data
+        file_path, player_names, table_title_part, table_segment, _ = data
         key = file_path
 
         if key not in self.active_huds:
@@ -546,6 +568,17 @@ class HUDManager(QObject):
         if file_path in self.active_huds:
             self.active_huds.pop(file_path)
             print(f"MANAGER: Удален HUD для файла: {os.path.basename(file_path)}. Активных HUD: {len(self.active_huds)}")
+
+    def close_all(self):
+        """Закрывает все окна HUD и статистики."""
+        print("MANAGER: Closing all HUDs and Stats Windows...")
+        for hud in self.active_huds.values():
+            hud.close()
+        self.active_huds.clear()
+        
+        if self.personal_stats_window:
+            self.personal_stats_window.close_all_children() # We will add this method
+            self.personal_stats_window.close()
 
 
 # --- ФУНКЦИИ УПРАВЛЕНИЯ ---
@@ -621,6 +654,9 @@ if __name__ == '__main__':
 
     if args.load_all:
         print("--- 💾 АКТИВИРОВАН РЕЖИМ ПОЛНОЙ ЗАГРУЗКИ ---")
+        # Очистка базы перед загрузкой
+        remove_database_files()
+        setup_database() # Пересоздаем файлы (пустые)
         run_full_load(TARGET_HISTORY_DIR, filter_segment=args.filter_segment, filter_date=args.filter_date)
 
     # --- 2. СТАНДАРТНАЯ ИНИЦИАЛИЗАЦИЯ (Для мониторинга) ---
@@ -646,7 +682,7 @@ if __name__ == '__main__':
 
     monitor_signals = MonitorSignals()
     # watchdog_thread теперь создается как не-демонический по умолчанию
-    watchdog_thread = WatchdogThread(TARGET_HISTORY_DIR, monitor_signals)
+    watchdog_thread = WatchdogThread(TARGET_HISTORY_DIR, monitor_signals, session_start_time=SESSION_START_TIME)
 
     monitor_signals.stat_updated.connect(hud_manager.handle_update_signal)
 
@@ -659,6 +695,14 @@ if __name__ == '__main__':
     # Подключаем функцию очистки к сигналу, который срабатывает при закрытии app.exec()
     app.aboutToQuit.connect(cleanup_before_exit)
     # ------------------------------------------
+
+    # --- GLOBAL CLEANUP ON EXIT ---
+    def global_cleanup():
+        print("Exiting application, closing all windows...")
+        hud_manager.close_all()
+        QApplication.closeAllWindows()
+
+    app.aboutToQuit.connect(global_cleanup)
 
     watchdog_thread.start()
     print(f"--- Запущен мониторинг директории '{TARGET_HISTORY_DIR}' ---")
