@@ -6,3 +6,8 @@ temp
 Описание
 poker_stats.db*
 hands
+# Test Environment
+test_history/
+test_poker_stats.db
+test_poker_stats.db-journal
+trace*.log

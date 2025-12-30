@@ -224,8 +224,11 @@ def process_file_full_load(file_path: str, filter_segment: Optional[str] = None,
 
         if filter_date:
             filter_dt = datetime.datetime.strptime(filter_date, "%Y-%m-%d").date()
+            # DEBUG: Print checking
+            # print(f"Checking {filename}: First Hand Date {date_segment} vs Filter {filter_dt}")
+            
             if date_segment < filter_dt:
-                # print(f"   [LOAD] Пропуск {date_segment} -> Ранее: {filter_dt}")
+                # print(f"   [LOAD] Skipped {filename} ({date_segment} < {filter_dt})")
                 return
 
         # Обработка и запись в БД
