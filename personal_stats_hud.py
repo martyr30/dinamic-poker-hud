@@ -1,7 +1,7 @@
 from typing import Dict, Any, Optional
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
-    QHeaderView, QDateEdit, QPushButton, QHBoxLayout, QCheckBox, QFrame
+    QHeaderView, QDateEdit, QPushButton, QHBoxLayout, QCheckBox, QFrame, QComboBox
 )
 from PySide6.QtCore import Qt, QTimer, QDate, QPoint, Signal
 from PySide6.QtGui import QMouseEvent, QColor
@@ -21,6 +21,7 @@ class PersonalStatsWindow(QWidget):
 
     def __init__(self, target_player_name: str):
         super().__init__()
+
 
         self.setWindowTitle(f"Моя Статистика - {target_player_name}")
         self.target_player = target_player_name
@@ -111,6 +112,17 @@ class PersonalStatsWindow(QWidget):
         self.btn_graph.clicked.connect(self.open_graph)
         filter_layout.addWidget(self.btn_graph)
         
+        # --- VIEW MODE SELECTOR ---
+        # from PySide6.QtWidgets import QComboBox # Moved to top
+        self.view_mode_combo = QComboBox()
+        self.view_mode_combo.addItems(["Total ($)", "Total (BB)", "BB/100"])
+        self.view_mode_combo.setStyleSheet("""
+            QComboBox { background-color: #333; color: white; border: 1px solid #555; padding: 2px; }
+            QComboBox::drop-down { border: none; }
+        """)
+        self.view_mode_combo.currentIndexChanged.connect(self.on_view_mode_changed)
+        filter_layout.addWidget(self.view_mode_combo)
+        
         filter_layout.addStretch()
         # self.main_layout.addLayout(filter_layout) # Moved to filter_frame
         filter_box_layout.addLayout(filter_layout)
@@ -124,7 +136,8 @@ class PersonalStatsWindow(QWidget):
         self.stats_table.setHorizontalHeaderLabels([
             "TOTAL", "UTG", "MP", "CO", "BU", "SB", "BB"
         ])
-        self.stats_table.setVerticalHeaderLabels(["Hands", "VPIP %", "PFR %", "RFI %", "Net BB/100", "WSD BB/100", "WNSD BB/100", "EV BB/100"])
+        # Default Headers (will be updated)
+        self.stats_table.setVerticalHeaderLabels(["Hands", "VPIP %", "PFR %", "RFI %", "Net Won", "WSD", "WNSD", "EV"])
         self.stats_table.cellClicked.connect(self.on_table_cell_clicked)
 
         # Стилизация таблицы
@@ -308,10 +321,28 @@ class PersonalStatsWindow(QWidget):
             self.btn_mini.setText("_")
             self.adjust_window_size()
 
+    def on_view_mode_changed(self):
+        """Redraws table with new mode using cached stats."""
+        if hasattr(self, 'current_stats') and self.current_stats:
+            self.update_stats_table(self.current_stats)
+
     def update_stats_table(self, stats: Dict[str, Dict[str, Any]]):
         """Заполняет таблицу данными."""
         self.current_stats = stats # Save for mini mode
         
+        # Determine Mode
+        mode = self.view_mode_combo.currentText()
+        # Update Row Headers based on mode
+        suffix = ""
+        if mode == "Total ($)": suffix = " ($)"
+        elif mode == "Total (BB)": suffix = " (BB)"
+        elif mode == "BB/100": suffix = " BB/100"
+        
+        self.stats_table.setVerticalHeaderLabels([
+            "Hands", "VPIP %", "PFR %", "RFI %", 
+            f"Net Won{suffix}", f"WSD{suffix}", f"WNSD{suffix}", f"EV{suffix}"
+        ])
+
         # Update Mini Label dynamically
         if self.is_mini_mode:
              hands = stats.get('hands', {}).get('total', 0)
@@ -326,60 +357,88 @@ class PersonalStatsWindow(QWidget):
         pfr_data = stats.get('pfr', {})
         rfi_data = stats.get('rfi', {})
         
-        bb_won_data = stats.get('bb_won', {})
-        wsd_bb_data = stats.get('wsd_bb', {})
-        wnsd_bb_data = stats.get('wnsd_bb', {})
-        ev_data = stats.get('ev', {})
+        # Raw Data Sources
+        net_won_data = stats.get('net_won', {})      # Dollars
+        bb_won_data = stats.get('bb_won', {})        # BB Sum (Total BB)
+        
+        wsd_profit_data = stats.get('wsd_profit', {}) # Dollars
+        wsd_bb_data = stats.get('wsd_bb', {})         # BB Sum
+        
+        wnsd_profit_data = stats.get('wnsd_profit', {}) # Dollars
+        wnsd_bb_data = stats.get('wnsd_bb', {})         # BB Sum
+        
+        ev_data = stats.get('ev', {})               # Dollars
+        ev_bb_data = stats.get('ev_bb', {})         # BB Sum
 
-        # Вспомогательная функция для установки ячейки
-        def set_cell(row, col, value, count_hands=0, is_bb100=False, color=None):
-            text_val = str(value)
-            
-            if is_bb100:
-                if count_hands > 0:
-                     bb100 = (float(value) / count_hands) * 100
-                else:
-                     bb100 = 0.0
-                text_val = f"{bb100:+.2f}"
-                if bb100 > 0: color = QColor("#00FF00")
-                elif bb100 < 0: color = QColor("#FF0000")
-            elif isinstance(value, float):
-                 text_val = f"{value:.2f}"
+        # Helper to get the right value for the cell
+        def get_mode_value(pos, dollar_dict, bb_dict, cnt):
+            if mode == "Total ($)":
+                return dollar_dict.get(pos, 0.0)
+            elif mode == "Total (BB)":
+                return bb_dict.get(pos, 0.0)
+            elif mode == "BB/100":
+                bb_total = bb_dict.get(pos, 0.0)
+                if cnt > 0:
+                    return (bb_total / cnt) * 100
+                return 0.0
+            return 0.0
+
+        def set_cell_fin(row, col, val, is_bb100_mode=False):
+            text_val = f"{val:.2f}"
+            if is_bb100_mode: text_val = f"{val:+.2f}" # Always show sign for BB/100
+            elif mode == "Total ($)": text_val = f"${val:.2f}"
+            elif mode == "Total (BB)": text_val = f"{val:+.1f} BB"
             
             item = QTableWidgetItem(text_val)
             item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            if color:
-                item.setForeground(color)
+            
+            # Color logic
+            if val > 0: item.setForeground(QColor("#00FF00"))
+            elif val < 0: item.setForeground(QColor("#FF0000"))
+            
+            self.stats_table.setItem(row, col, item)
+
+        def set_cell_simple(row, col, val):
+            item = QTableWidgetItem(str(val))
+            item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.stats_table.setItem(row, col, item)
 
         for col_idx, pos in enumerate(positions):
             cnt_hands = hands_data.get(pos, 0)
             
             # Row 0: Hands
-            set_cell(0, col_idx, cnt_hands)
+            set_cell_simple(0, col_idx, cnt_hands)
             # Row 1: VPIP
-            set_cell(1, col_idx, vpip_data.get(pos, "0.0"))
+            set_cell_simple(1, col_idx, vpip_data.get(pos, "0.0"))
             # Row 2: PFR
-            set_cell(2, col_idx, pfr_data.get(pos, "0.0"))
-            # Row 4: Net Won BB/100
-            set_cell(4, col_idx, bb_won_data.get(pos, 0.0), cnt_hands, True)
-            # Row 5: WSD BB/100
-            set_cell(5, col_idx, wsd_bb_data.get(pos, 0.0), cnt_hands, True)
-            # Row 6: WNSD BB/100
-            set_cell(6, col_idx, wnsd_bb_data.get(pos, 0.0), cnt_hands, True)
-            # Row 7: EV BB/100
-            # Use 'ev_bb_data' (Total BBs) instead of 'ev_data' (Total Dollars)
-            set_cell(7, col_idx, stats.get('ev_bb', {}).get(pos, 0.0), cnt_hands, True)
+            set_cell_simple(2, col_idx, pfr_data.get(pos, "0.0"))
+            
+            # Financial Rows
+            # Row 4: Net Won
+            val_net = get_mode_value(pos, net_won_data, bb_won_data, cnt_hands)
+            set_cell_fin(4, col_idx, val_net, mode=="BB/100")
+            
+            # Row 5: WSD
+            val_wsd = get_mode_value(pos, wsd_profit_data, wsd_bb_data, cnt_hands)
+            set_cell_fin(5, col_idx, val_wsd, mode=="BB/100")
+            
+            # Row 6: WNSD
+            val_wnsd = get_mode_value(pos, wnsd_profit_data, wnsd_bb_data, cnt_hands)
+            set_cell_fin(6, col_idx, val_wnsd, mode=="BB/100")
+            
+            # Row 7: EV
+            val_ev = get_mode_value(pos, ev_data, ev_bb_data, cnt_hands)
+            set_cell_fin(7, col_idx, val_ev, mode=="BB/100")
 
         # Row 3: RFI
         rfi_positions = ["utg", "mp", "co", "bu", "sb"]
-        set_cell(3, 0, "-") 
+        set_cell_simple(3, 0, "-") 
         
         for i, pos in enumerate(rfi_positions):
-             set_cell(3, i+1, rfi_data.get(pos, "0.0"))
+             set_cell_simple(3, i+1, rfi_data.get(pos, "0.0"))
         
         # BB RFI
-        set_cell(3, 6, "-")
+        set_cell_simple(3, 6, "-")
 
         # --- Update Blind Defense Stats ---
         bb_def = stats.get('bb_defense', {})
