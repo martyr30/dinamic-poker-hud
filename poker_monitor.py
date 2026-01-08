@@ -264,7 +264,19 @@ def process_file_full_load(file_path: str, filter_segment: Optional[str] = None,
             return
 
         hhs_iterator = CustomHandHistory.from_pokerstars(full_content, error_status=True)
-        hhs_list = list(hhs_iterator)
+        # hhs_list = list(hhs_iterator) # Old unsafe way
+        
+        hhs_list = []
+        while True:
+            try:
+                hh = next(hhs_iterator)
+                hhs_list.append(hh)
+            except StopIteration:
+                break
+            except Exception as e:
+                # Optional: Log specific parsing error
+                # print(f"⚠️ Warning: Skipped bad hand in {filename}: {e}")
+                continue
 
         if not hhs_list:
             return
