@@ -1,0 +1,37 @@
+tests:
+  - target_module: "run_tests.py"
+    type: "integration"
+    cases:
+      - name: "Full Cycle Data Verification"
+        input: "Selected raw hand history files from 'setup_test_env.py'"
+        expected: "Database populated, 0 NULL profits, EV calculated for all-ins"
+        notes: "This is the primary regression test. It clears a test DB, loads files, and queries SQL to verify data integrity."
+
+  - target_module: "poker_stats_db.py"
+    type: "unit"
+    cases:
+      - name: "Hand Strength Calculation"
+        input: "Board: [As, Ks, Qs], Hand: [Js, Ts]"
+        expected: "Royal Flush"
+        notes: "Tested implicitly via check_hand_logic"
+      
+      - name: "DB Initialization"
+        input: "setup_database()"
+        expected: "poker_stats.db created with correct schema"
+        notes: "Crucial for first run"
+
+  - target_module: "my_pokerkit_parser.py"
+    type: "unit"
+    cases:
+      - name: "Parse Valid Hand"
+        input: "Raw text of a standard PokerStars hand"
+        expected: "HandHistory object with correct players and actions"
+        notes: "Must handle side pots and uncalled bets correctly"
+
+  - target_module: "poker_monitor.py"
+    type: "system"
+    cases:
+      - name: "File Watchdog Trigger"
+        input: "Appending text to a monitored file"
+        expected: "Signal 'stat_updated' emitted properly"
+        notes: "Requires real file system events"

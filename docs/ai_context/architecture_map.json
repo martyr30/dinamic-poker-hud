@@ -1,0 +1,109 @@
+{
+    "project": "DinamicHUD",
+    "modules": [
+        {
+            "path": "main.py",
+            "summary": "Main application entry point. Manages HUD windows, attaches them to poker tables, and handles the application lifecycle.",
+            "classes": [
+                "HUDWindow",
+                "HUDManager"
+            ],
+            "functions": [
+                "run_full_load",
+                "parse_arguments",
+                "cleanup_before_exit",
+                "update_data"
+            ],
+            "dependencies": [
+                "poker_monitor",
+                "macos_window_utils",
+                "personal_stats_hud",
+                "PySide6"
+            ]
+        },
+        {
+            "path": "poker_monitor.py",
+            "summary": "File system watcher that detects and processes real-time updates to poker hand history files.",
+            "classes": [
+                "WatchdogThread",
+                "MonitorSignals"
+            ],
+            "functions": [
+                "process_file_update",
+                "process_file_full_load",
+                "is_tournament_file",
+                "extract_table_name"
+            ],
+            "dependencies": [
+                "my_pokerkit_parser",
+                "poker_stats_db"
+            ]
+        },
+        {
+            "path": "poker_stats_db.py",
+            "summary": "Core logic for database operations, statistical calculations, and hand analysis.",
+            "classes": [],
+            "functions": [
+                "setup_database",
+                "analyze_hand_for_stats",
+                "update_stats_in_db",
+                "get_stats_for_players",
+                "calculate_equity_monte_carlo",
+                "get_player_extended_stats"
+            ],
+            "dependencies": [
+                "sqlite3",
+                "pandas",
+                "pokerkit"
+            ]
+        },
+        {
+            "path": "my_pokerkit_parser.py",
+            "summary": "Customized parser for PokerStars hand history files, extending the pokerkit library.",
+            "classes": [
+                "CustomPokerStarsParser",
+                "CustomHandHistory"
+            ],
+            "functions": [
+                "from_pokerstars",
+                "_parse_players",
+                "_get_betting_action"
+            ],
+            "dependencies": [
+                "pokerkit"
+            ]
+        },
+        {
+            "path": "personal_stats_hud.py",
+            "summary": "UI component for displaying detailed hero statistics, including graphs and hand matrices.",
+            "classes": [
+                "PersonalStatsWindow"
+            ],
+            "functions": [
+                "refresh_stats",
+                "update_stats_table",
+                "open_graph"
+            ],
+            "dependencies": [
+                "poker_stats_db",
+                "graph_widget",
+                "hand_matrix_widget"
+            ]
+        },
+        {
+            "path": "macos_window_utils.py",
+            "summary": "MacOS-specific utilities for window management and coordinate retrieval.",
+            "classes": [
+                "MacOSWindowAdapter"
+            ],
+            "functions": [
+                "get_window_bounds",
+                "list_poker_windows"
+            ],
+            "dependencies": [
+                "Quartz",
+                "pywinctl"
+            ]
+        }
+    ]
+}
