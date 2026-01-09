@@ -200,9 +200,23 @@ def process_file_update(file_path: str, filter_segment: Optional[str] = None, fi
              if session_start_time:
                  hero_stats = get_player_extended_stats(MY_PLAYER_NAME, "", min_time=session_start_time)
              else:
-                 # Fallback: fetch for today if no start time given
                  today = datetime.datetime.combine(datetime.date.today(), datetime.time.min)
                  hero_stats = get_player_extended_stats(MY_PLAYER_NAME, "", min_time=today)
+
+        if hhs_list:
+            last_hh = hhs_list[-1]
+            try:
+                # В PokerKit min_bet обычно соответствует размеру ББ
+                bb_size = last_hh.min_bet
+                if bb_size > 0:
+                    for i, player_name in enumerate(last_hh.players):
+                        if player_name in table_stats:
+                            stack = last_hh.starting_stacks[i]
+                            # Рассчитываем и форматируем стек в ББ (целое число)
+                            stack_bb = int(stack / bb_size)
+                            table_stats[player_name]['stack_bb'] = stack_bb
+            except Exception as e:
+                print(f"⚠️ Ошибка расчета стеков в BB: {e}")
 
         FILE_SIZES[file_path] = current_size
 
