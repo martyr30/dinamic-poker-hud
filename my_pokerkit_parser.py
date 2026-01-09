@@ -15,6 +15,7 @@ class CustomPokerStarsParser(PokerStarsParser):
     IGNORED_ACTION_PATTERNS = (
         compile(r'.+ joins the table at seat #\d+'),
         compile(r'.+: sits out'),
+        compile(r'.+ has timed out'),
     )
     # Паттерны для ставок и рейзов. Теперь это кортеж, а не одно выражение.
     COMPLETION_BETTING_OR_RAISING = (
@@ -72,21 +73,33 @@ class CustomPokerStarsParser(PokerStarsParser):
             action = f'{formatted_player} cbr {bets[formatted_player]}'
         return action
 
-    # Переопределяем метод, чтобы он мог работать с кортежем COMPLETION_BETTING_OR_RAISING
-    def _parse_players(self, s: str) -> Set[str]:
+    def _parse_players(self, s: str) ->  Sequence[str]:
         """
         Переопределенный метод для сбора имен игроков.
-        Умеет работать с кортежем регулярных выражений для ставок/рейзов.
+        Возвращает список игроков, отсортированный по номеру места (Seat),
+        чтобы порядок p1, p2... соответствовал порядку мест.
         """
-        all_players_at_table = set()
+        players_with_seats = {}
         sitting_out_players = set()
 
         # За один проход находим всех игроков и тех, кто в ситауте
+        
+        # Используем стандартный regex для определения валидной строки с игроком
+        # Pattern: Seat \d+: (?P<player>.+) \(\D?(?P<starting_stack>[0-9.]+) in chips\)
+        
+        seat_num_pattern = compile(r'Seat (\d+):')
+
         for line in s.splitlines():
             # Ищем игроков по строкам 'Seat X: PlayerName (...)'
             if m := search(self.STARTING_STACKS, line):
-                player_name = m.group('player')
-                all_players_at_table.add(player_name)
+                # Извлекаем имя игрока через именованную группу (стандартный функционал)
+                player_name = m.group('player').strip()
+                
+                # Извлекаем номер места отдельным простым regex, так как STARTING_STACKS его не захватывает в группу
+                if sm := seat_num_pattern.search(line):
+                     seat_num = int(sm.group(1))
+                     players_with_seats[seat_num] = player_name
+                
                 # Проверяем, не находится ли этот игрок в ситауте
                 if 'is sitting out' in line:
                     sitting_out_players.add(player_name)
@@ -96,8 +109,12 @@ class CustomPokerStarsParser(PokerStarsParser):
                 player_name = line.split(':')[0].strip()
                 sitting_out_players.add(player_name)
 
-        # Возвращаем только активных игроков
-        active_players = all_players_at_table - sitting_out_players
+        # Сортируем по номеру места
+        sorted_seats = sorted(players_with_seats.keys())
+        ordered_players = [players_with_seats[s] for s in sorted_seats]
+        
+        # Исключаем сидящих в ситауте, сохраняя порядок
+        active_players = [p for p in ordered_players if p not in sitting_out_players]
         
         return active_players
 
@@ -198,15 +215,12 @@ class CustomPokerStarsParser(PokerStarsParser):
             for line in s.splitlines():
                 for pattern in patterns_to_check:
                     if m := search(pattern, line):
-                        # ВАЖНО: Надежное извлечение имени игрока.
-                        # Имя может быть как "Player (small blind)" так и просто "Player".
                         raw_player_name = m.group('player')
                         if '(' in raw_player_name:
                             player_in_line = raw_player_name.split('(')[0].strip()
                         else:
                             player_in_line = raw_player_name.strip()
 
-                        # НОВАЯ ПРОВЕРКА: Убедимся, что найденный игрок есть в списке активных
                         if player_in_line not in active_players:
                             continue
 
@@ -246,13 +260,22 @@ class CustomHandHistory(HandHistory):
         # Здесь мы создаем экземпляр нашего парсера, а не стандартного.
         parser = CustomPokerStarsParser()
         
-        # Вызываем его и возвращаем результат.
-        # Тип возвращаемого значения будет генератором CustomHandHistory.
-        yield from parser(
-            s,
-            parse_value=parse_value,
-            error_status=error_status,
-        )
+        # 0. Pre-scan for Rake amounts (manually)
+        # Pattern: Total pot $2.84 | Rake $0.14
+        # Note: Regex needs to match multiline or be iterated
+        import re
+        rake_pattern = re.compile(r'Total pot .*?\| Rake \$(?P<rake>[\d.]+)')
+        all_rakes = [float(m.group('rake')) for m in rake_pattern.finditer(s)]
+        
+        # 1. Parse and Yield
+        hh_gen = parser(s, parse_value=parse_value, error_status=error_status)
+        
+        for i, hh in enumerate(hh_gen):
+            if i < len(all_rakes):
+                setattr(hh, 'rake_amount', all_rakes[i])
+            else:
+                setattr(hh, 'rake_amount', 0.0)
+            yield hh
 
 # 3. Пример использования
 if __name__ == '__main__':

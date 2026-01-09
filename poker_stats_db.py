@@ -1126,6 +1126,7 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str, kn
     for action_str in hand_history.actions:
         parts = action_str.split()
 
+
         # Сброс ставок при переходе на новую улицу (флоп, терн, ривер)
         # Сброс ставок при переходе на новую улицу (флоп, терн, ривер)
         if parts[0] == 'd' and parts[1] == 'db':
@@ -1228,6 +1229,20 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str, kn
             elif action_type_code == 'f': # Fold
                 last_action_was_fold = True
                 active_players.discard(player_name)
+
+            elif action_type_code == 'r': # Return Bet (Uncalled bet returned)
+                # Format: pX r amount
+                # Example: p1 r 1.12
+                return_amount = Decimal(parts[2])
+                
+                # Correct investment and bets
+                total_investment[player_code] -= return_amount
+                bets_this_street[player_code] -= return_amount
+                remaining_stacks[player_code] += return_amount # Вернулось в стек
+                
+                # If this return affects current_street_bet (unlikely for max bet, but good to check correctness)
+                # Usually return bet happens at end of street or hand. 
+                # It reduces the "effective" bet of the player.
 
             # --- ЗАПИСЬ ИНФОРМАЦИИ ПРИ ДЕЙСТВИИ ХИРО ---
             if player_code == analyze_player_code:
@@ -1332,6 +1347,35 @@ def analyze_player_stats(hand_history: HandHistory, analyze_player_name: str, kn
             'fold_to_3bet_opp': data.get('fold_to_3bet_opp', 0),
             'bb_size': data.get('bb_size', 0.0)
         }
+
+    # RECALCULATE NET PROFIT USING STACKS (Fixes uncalled bet return issues)
+    try:
+        if analyze_player_name in hand_history.players:
+            h_idx = hand_history.players.index(analyze_player_name)
+            start_stack = hand_history.starting_stacks[h_idx]
+            
+            final_state = None
+            for state in hand_history:
+                final_state = state
+                
+            if final_state:
+                end_stack = final_state.stacks[h_idx]
+                # Use Decimal strings to ensure precision
+                reliable_profit = float(Decimal(str(end_stack)) - Decimal(str(start_stack)))
+                
+                if analyze_player_name in final_stats:
+                    # Subtract Rake if we won (assuming we paid it)
+                    # Note: We now pre-parse rake into 'rake_amount' attribute in CustomHandHistory
+                    rake_val = getattr(hand_history, 'rake_amount', 0.0)
+                    if reliable_profit > 0 and rake_val > 0:
+                         reliable_profit -= float(rake_val)
+                            
+
+
+                    final_stats[analyze_player_name]['net_profit'] = reliable_profit
+    except Exception as e:
+        # print(f"DEBUG PROFIT ERROR: {e}")
+        pass
     
     # Calculate WTSD/WSD for Hero
     was_showdown = len(active_players) > 1
