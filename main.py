@@ -324,8 +324,13 @@ class HUDWindow(QWidget):
                 # Здесь hands_val ГАРАНТИРОВАННО определен.
                 color_code = self._get_player_color(vpip_val, pfr_val, hands_val)
 
+                # Формирование строки с именем и (опционально) стеком
+                hud_header = f"{name} ({data['hands']})"
+                if 'stack_bb' in data:
+                    hud_header += f" | {data['stack_bb']}BB"
+
                 hud_line = (
-                    f"{name} ({data['hands']})\n"
+                    f"{hud_header}\n"
                     f"{data['vpip']}/{data['pfr']}\n"
                     f"3B:{data['3bet']} F3B:{data['f3bet']}\n"
                     f"CB:{data['cbet']} FCB:{data['fcbet']}\n"
@@ -397,11 +402,11 @@ class HUDWindow(QWidget):
         
         pos_map = {
             0: (0.50, 0.88), # Hero
-            1: (0.08, 0.65), # Left Bottom
-            2: (0.08, 0.25), # Left Top
+            1: (0.125, 0.65), # Left Bottom
+            2: (0.125, 0.25), # Left Top
             3: (0.50, 0.12), # Top
-            4: (0.92, 0.25), # Right Top
-            5: (0.92, 0.65), # Right Bottom
+            4: (0.875, 0.25), # Right Top
+            5: (0.875, 0.65), # Right Bottom
         }
         
         rel_x, rel_y = pos_map.get(visual_pos, (0.5, 0.5))

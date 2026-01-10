@@ -1,3 +1,18 @@
+# 🚀 Release Notes: DinamicHUD v1.2 (UX Improvements)
+
+## 🌟 New Features
+### **1. Optimized HUD Layout**
+-   **Positions Adjusted**: Shifted HUD panels for fringe players (Left Top/Bottom and Right Top/Bottom) slightly inward (12.5% from edge).
+    -   *Impact*: Prevents the HUD from being cut off by the screen edge or obscuring player avatars on 6-max tables.
+    -   *Symmetry*: Both left and right sides are now perfectly symmetrical.
+
+### **2. Personal Stats "Mini Mode" Upgrade**
+-   **Background Refresh**: The "Update" action is now threaded, preventing the "Window Not Responding" freeze during database queries.
+-   **Mini-Mode Access**: Added a **Refresh (⟳)** button directly to the minimized title bar. You no longer need to expand the window to update your stats.
+-   **Visual Feedback**: added loading indicators ("⏳") to signal when data is being processed.
+
+---
+
 # 🚀 Release Notes: DinamicHUD v1.1 (EV & UI Update)
 
 ## 🌟 New Features
