@@ -3,12 +3,31 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QLabel, QTableWidget, QTableWidgetItem,
     QHeaderView, QDateEdit, QPushButton, QHBoxLayout, QCheckBox, QFrame, QComboBox
 )
-from PySide6.QtCore import Qt, QTimer, QDate, QPoint, Signal
+from PySide6.QtCore import Qt, QTimer, QDate, QPoint, Signal, QThread, Slot
 from PySide6.QtGui import QMouseEvent, QColor
 from datetime import datetime, time
 from poker_stats_db import get_player_extended_stats, get_chart_hands_data, get_player_hand_log_df
 from hand_matrix_widget import HandChartDialog
 from graph_widget import PokerGraphWidget
+
+
+class StatsLoaderThread(QThread):
+    stats_loaded = Signal(object) # Returns dict or None
+
+    def __init__(self, player_name, dt_from, dt_to):
+        super().__init__()
+        self.player_name = player_name
+        self.dt_from = dt_from
+        self.dt_to = dt_to
+
+    def run(self):
+        try:
+             # Используем пустой table_segment, так как фильтруем по all my_hand_log
+            stats = get_player_extended_stats(self.player_name, "", min_time=self.dt_from, max_time=self.dt_to)
+            self.stats_loaded.emit(stats)
+        except Exception as e:
+            print(f"Thread Error: {e}")
+            self.stats_loaded.emit(None)
 
 class PersonalStatsWindow(QWidget):
     """
@@ -25,6 +44,9 @@ class PersonalStatsWindow(QWidget):
 
         self.setWindowTitle(f"Моя Статистика - {target_player_name}")
         self.target_player = target_player_name
+        
+        # Thread reference
+        self.loader_thread = None
 
         self.dragging = False
         self.offset = QPoint()
@@ -50,6 +72,15 @@ class PersonalStatsWindow(QWidget):
         
         # Кнопка Mini Mode
         self.is_mini_mode = False
+
+        # Кнопка Refresh для Mini Mode (скрыта по умолчанию)
+        self.btn_mini_refresh = QPushButton("⟳")
+        self.btn_mini_refresh.setFixedSize(24, 24)
+        self.btn_mini_refresh.setStyleSheet("background-color: #444; color: white; border: none; font-weight: bold;")
+        self.btn_mini_refresh.clicked.connect(self.refresh_stats)
+        self.btn_mini_refresh.hide()
+        header_layout.addWidget(self.btn_mini_refresh)
+
         self.btn_mini = QPushButton("_")
         self.btn_mini.setFixedSize(24, 24)
         self.btn_mini.setStyleSheet("background-color: #444; color: white; border: none; font-weight: bold;")
@@ -250,31 +281,50 @@ class PersonalStatsWindow(QWidget):
         self.date_to.setEnabled(self.check_to.isChecked())
 
     def refresh_stats(self):
-        """Загружает данные из БД с учетом выбранных дат."""
-        try:
-            # 1. Определяем диапазон времени
-            # Начало дня "С"
-            qdate_from = self.date_from.date()
-            dt_from = datetime.combine(qdate_from.toPython(), time.min)
+        """Запускает обновление статистики в отдельном потоке."""
+        if self.loader_thread and self.loader_thread.isRunning():
+            return # Уже обновляемся
 
-            # Конец дня "По" (если включено)
-            dt_to = None
-            if self.check_to.isChecked():
-                qdate_to = self.date_to.date()
-                dt_to = datetime.combine(qdate_to.toPython(), time.max)
-            
-            # 2. Запрос в БД
-            # Используем пустой table_segment, так как фильтруем по all my_hand_log
-            stats = get_player_extended_stats(self.target_player, "", min_time=dt_from, max_time=dt_to)
-            
-            if stats:
-                self.update_stats_table(stats)
-            else:
-                 # Если данных нет (например, пустой результат), можно очистить таблицу или оставить нули
-                 pass 
+        # 1. UI Feedback
+        self.btn_refresh.setEnabled(False)
+        self.btn_mini_refresh.setEnabled(False)
+        self.btn_mini_refresh.setText("⏳") # Clock hourglass
+        
+        if self.is_mini_mode:
+            self.mini_stats_label.setText("Загрузка...")
 
-        except Exception as e:
-            print(f"Ошибка обновления личной статистики: {e}")
+        # 2. Определяем параметры
+        qdate_from = self.date_from.date()
+        dt_from = datetime.combine(qdate_from.toPython(), time.min)
+
+        dt_to = None
+        if self.check_to.isChecked():
+            qdate_to = self.date_to.date()
+            dt_to = datetime.combine(qdate_to.toPython(), time.max)
+            
+        # 3. Запускаем поток
+        self.loader_thread = StatsLoaderThread(self.target_player, dt_from, dt_to)
+        self.loader_thread.stats_loaded.connect(self.on_stats_loaded)
+        self.loader_thread.start()
+
+    @Slot(object)
+    def on_stats_loaded(self, stats):
+        """Слот, вызываемый по завершении потока."""
+        self.loader_thread = None
+        
+        # Восстанавливаем кнопки
+        self.btn_refresh.setEnabled(True)
+        self.btn_mini_refresh.setEnabled(True)
+        self.btn_mini_refresh.setText("⟳")
+        
+        if stats:
+             self.update_stats_table(stats)
+        else:
+             if self.is_mini_mode:
+                  self.mini_stats_label.setText("Нет данных")
+
+    # update_stats_table остается без изменений, он обновляет UI.
+
 
     def closeEvent(self, event):
         self.close_all_children()
@@ -302,6 +352,7 @@ class PersonalStatsWindow(QWidget):
             self.defense_group.hide()
             # Show Mini Label
             self.mini_stats_label.show()
+            self.btn_mini_refresh.show() # Show refresh button in mini mode
             self.btn_mini.setText("□") # Icon for restore
             
             # Update content
@@ -318,6 +369,7 @@ class PersonalStatsWindow(QWidget):
             self.stats_table.show()
             self.defense_group.show()
             self.mini_stats_label.hide()
+            self.btn_mini_refresh.hide() # Hide refresh button in full mode
             self.btn_mini.setText("_")
             self.adjust_window_size()
 

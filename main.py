@@ -402,11 +402,11 @@ class HUDWindow(QWidget):
         
         pos_map = {
             0: (0.50, 0.88), # Hero
-            1: (0.08, 0.65), # Left Bottom
-            2: (0.08, 0.25), # Left Top
+            1: (0.125, 0.65), # Left Bottom
+            2: (0.125, 0.25), # Left Top
             3: (0.50, 0.12), # Top
-            4: (0.92, 0.25), # Right Top
-            5: (0.92, 0.65), # Right Bottom
+            4: (0.875, 0.25), # Right Top
+            5: (0.875, 0.65), # Right Bottom
         }
         
         rel_x, rel_y = pos_map.get(visual_pos, (0.5, 0.5))
